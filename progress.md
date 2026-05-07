@@ -42,11 +42,12 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 - [x] End-to-end verified: 28 real events (25 Ch 11 + 3 Ch 7) ingested into Supabase, 3 alerts delivered to httpbin with HTTP 200, classifications calibrated (24 business, 0 individual, 4 unknown including Keysha J. Johnson and NB Element DTS — conservative by design)
 
 ## Phase 3 — Messy parts
-- [ ] Business-vs-consumer filter (entity-name regex + docket-entry fingerprint + confidence score)
-- [ ] Joint-petition handling (multiple debtors per event)
+- [x] Business-vs-consumer filter (entity-name regex + docket-entry fingerprint + confidence score) — implemented in normalize.classify_debtor; calibrated 39% business / 31% individual / 30% unknown on a 208-event sample
+- [x] Related-filing-group clustering (`bankruptcy/clustering.py`) — two-pass: explicit `joint_administration` flag from CourtListener (zero false positives), then consecutive-case-number runs among business-classified events. Surfaced 10 corporate groups including QVC (17 entities), Impac/Copperfield/Synergy (12), Finch (4)
+- [x] Re-normalization pass (`scripts/renormalize.py`) — re-runs the normalizer on stored `raw` payloads. Used to retrofit the HTML-stripping fix without re-fetching from CourtListener
+- [x] Backfill: 208 events across 4 courts (deb, nysb, txsb, cacb) and chapters 7+11
 - [ ] EDGAR 8-K Item 1.03 cross-check as second source
-- [ ] Deduplication across sources
-- [ ] Backfill 30 days from 2–3 courts so the dashboard isn't empty
+- [ ] Deduplication across sources (depends on EDGAR)
 - [ ] Tradeoffs documented in README
 
 ## Phase 4 — Deck + README
@@ -87,3 +88,4 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 - 2026-05-07: Schema designed and committed (SCHEMA.md + migrations/001_initial_schema.sql). Three tables: bankruptcy_event, debtor, alert_delivery. Source mappings for CourtListener + EDGAR documented. UK / EU extension shapes sketched.
 - 2026-05-07: Ingestion vertical slice working end-to-end. Discovered CourtListener's `party` array conflates the actual debtor with procedural participants like "U.S. Trustee" — normalizer now uses `caseName` as the canonical primary debtor. Joint petitions in our data appear as separate dockets (Impac group: 9 dockets, Finch group: 4 dockets), to be clustered via `related_filing_group_id` in Phase 3.
 - 2026-05-07: Phase 2 vertical slice complete. API + dashboard + alerts running end-to-end. Hit `Starlette 1.0` API change (TemplateResponse now takes request as first positional). Webhook delivery to httpbin verified. Classification heuristic deliberately doesn't pattern-match on names ("FirstName Initial LastName" looks like a person but breaks on "Keysha J. Johnson Holdings LLC") — surfaces uncertainty as `unknown` rather than guessing. Phase 3 work to harden it: EDGAR cross-check, name-registry lookup, docket-fingerprint enrichment as cases mature.
+- 2026-05-07: Backfilled 180 events from nysb/txsb/cacb. Discovered CourtListener wraps `caseName` in HTML markup (`<b><font color="red">Jointly Administered</font></b>`) for jointly-administered cases — broke entity-suffix detection for QVC's 17-entity Texas filing. Fixed normalizer to strip HTML and capture the `joint_administration` flag separately. Re-processed all 208 events in place from the stored `raw` payloads (the schema's `raw JSONB` column paid off — no re-fetching needed). Two-pass clustering now uses joint_admin as the strongest signal (no false positives), with consecutive-case-numbers among business-classified events as fallback. Also fixed a pgbouncer + psycopg3 prepared-statement conflict by setting `prepare_threshold=None`.

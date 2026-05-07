@@ -11,6 +11,33 @@ from typing import Any, Optional
 
 from bankruptcy.models import BankruptcyEvent, Debtor
 
+# CourtListener wraps `caseName` in HTML for jointly-administered cases:
+#   "QVC GCH Company, LLC <b><font color=\"red\">Jointly Administered</font></b>"
+# Strip the markup before any name parsing.
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+JOINT_ADMIN_RE = re.compile(r"jointly\s+administered", re.I)
+LEAD_CASE_RE = re.compile(r"jointly\s+administered\s+(?:under\s+)?([\d:\-a-z]+)", re.I)
+
+
+def clean_case_name(raw: str) -> tuple[str, bool, Optional[str]]:
+    """Return (cleaned_name, is_joint_administered, lead_case_number_or_None).
+
+    Strips HTML and any trailing "Jointly Administered" phrasing, leaving just
+    the debtor name. Also surfaces whether the case carries the joint-admin
+    flag and the lead case number it points to (if present).
+    """
+    text = HTML_TAG_RE.sub(" ", raw).strip()
+    text = re.sub(r"\s+", " ", text)
+
+    is_joint = bool(JOINT_ADMIN_RE.search(text))
+    lead_match = LEAD_CASE_RE.search(text)
+    lead = lead_match.group(1) if lead_match else None
+
+    # Drop the trailing "Jointly Administered..." phrase for the canonical name.
+    cleaned = JOINT_ADMIN_RE.split(text, maxsplit=1)[0]
+    cleaned = cleaned.rstrip(",. ").strip()
+    return cleaned, is_joint, lead
+
 # --- Entity-name parsing ----------------------------------------------------
 
 # Order matters: longest patterns first so PLLC doesn't get caught by PC, etc.
@@ -132,13 +159,14 @@ def normalize_courtlistener_result(
     chapter_raw = result.get("chapter")
     chapter = str(chapter_raw) if chapter_raw is not None else ""
 
-    # `caseName` is the canonical reference for the primary debtor. The `party`
-    # array sometimes lists procedural participants (e.g. "U.S. Trustee")
-    # alongside the actual debtor, and the order isn't reliably debtor-first,
-    # so we don't rely on it. True joint petitions with co-debtors are rare in
-    # CourtListener's output (parallel corporate filings show up as *separate*
-    # dockets) and will be handled in Phase 3 if we find them.
-    case_name = result.get("caseName") or ""
+    # `caseName` is the canonical reference for the primary debtor. We strip
+    # HTML markup that CourtListener injects for jointly-administered cases
+    # ("<b><font color='red'>Jointly Administered</font></b>") and surface the
+    # joint-admin flag separately into jurisdiction_specific. The `party`
+    # array isn't reliable here — it sometimes lists procedural participants
+    # (e.g. "U.S. Trustee") and isn't ordered debtor-first.
+    raw_case_name = result.get("caseName") or ""
+    case_name, is_joint_admin, lead_case_number = clean_case_name(raw_case_name)
     parties: list[str] = [case_name] if case_name else []
 
     # Build the event first so we have its event_id for FK back-reference.
@@ -180,6 +208,10 @@ def normalize_courtlistener_result(
     ]
     if docket_entries:
         js["docket_entries"] = docket_entries
+    if is_joint_admin:
+        js["joint_administration"] = True
+        if lead_case_number:
+            js["lead_case_number"] = lead_case_number
     event_kwargs["jurisdiction_specific"] = js
 
     # Classification depends on the primary debtor's entity type + docket entries.
