@@ -20,9 +20,17 @@ from sqlmodel import Session, select
 
 from bankruptcy.db import engine
 from bankruptcy.models import BankruptcyEvent, Debtor
-from bankruptcy.normalize import normalize_courtlistener_result
+from bankruptcy.normalize import (
+    normalize_courtlistener_result,
+    normalize_edgar_filing,
+)
 
 logger = logging.getLogger("renormalize")
+
+NORMALIZERS = {
+    "courtlistener": normalize_courtlistener_result,
+    "edgar": normalize_edgar_filing,
+}
 
 
 def main() -> None:
@@ -30,14 +38,16 @@ def main() -> None:
     updated = errors = 0
 
     with Session(engine) as session:
-        events = session.exec(
-            select(BankruptcyEvent).where(BankruptcyEvent.source == "courtlistener")
-        ).all()
+        events = session.exec(select(BankruptcyEvent)).all()
         logger.info("re-normalizing %d events", len(events))
 
         for event in events:
+            normalizer = NORMALIZERS.get(event.source)
+            if not normalizer:
+                logger.warning("no normalizer for source=%s, skipping", event.source)
+                continue
             try:
-                new_event, new_debtors = normalize_courtlistener_result(event.raw)
+                new_event, new_debtors = normalizer(event.raw)
             except Exception:
                 logger.exception("renormalize failed for %s", event.source_record_id)
                 errors += 1

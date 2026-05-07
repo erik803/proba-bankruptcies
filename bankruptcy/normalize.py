@@ -143,6 +143,136 @@ def _parse_iso_datetime(s: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+# --- EDGAR mapper -----------------------------------------------------------
+
+# `display_names` items look like:
+#   "Luminar Technologies, Inc./DE  (LAZRQ)  (CIK 0001758057)"
+#   "MARIZYME, INC.  (CIK 0001413754)"                 <- no ticker
+#   "QVC Group, Inc.  (QVCGA, QVCGB, QVCGP)  (CIK 0001104659)"  <- multi-ticker
+TICKER_TOKEN = r"[A-Z0-9.\-]+"
+EDGAR_DISPLAY_NAME_RE = re.compile(
+    rf"^(?P<name>.+?)\s*"
+    rf"(?:\((?P<tickers>{TICKER_TOKEN}(?:\s*,\s*{TICKER_TOKEN})*)\)\s*)?"
+    rf"\(CIK\s+(?P<cik>\d+)\)\s*$"
+)
+
+
+def parse_edgar_display_name(
+    s: str,
+) -> tuple[str, list[str], Optional[str]]:
+    """Parse an EDGAR display_names entry into (name, tickers, cik).
+
+    `tickers` is a list because issuers with multiple share classes (QVC's
+    QVCGA / QVCGB / QVCGP) appear with all of them in one parenthetical.
+    """
+    m = EDGAR_DISPLAY_NAME_RE.match(s.strip())
+    if not m:
+        return s.strip(), [], None
+    name = m.group("name").strip().rstrip(",.")
+    # EDGAR appends a "/XX" state-of-incorporation marker to some names, e.g.
+    # "Luminar Technologies, Inc./DE". Strip it so downstream suffix stripping
+    # (Inc./Corp.) and tokenization don't pick "de" up as a name token.
+    name = re.sub(r"/[A-Z]{2}\s*$", "", name).strip().rstrip(",.")
+    tickers_str = m.group("tickers") or ""
+    tickers = [t.strip() for t in tickers_str.split(",") if t.strip()]
+    return name, tickers, m.group("cik")
+
+
+def normalize_edgar_filing(
+    hit: dict[str, Any],
+) -> tuple[BankruptcyEvent, list[Debtor]]:
+    """Map an EDGAR EFTS hit (8-K with Item 1.03) to BankruptcyEvent + Debtor.
+
+    EDGAR records are by definition public-company business filings, so
+    classification is set to ('business', 1.0, 'edgar_public_company').
+    Court information is left blank — the 8-K body usually names the
+    bankruptcy court, but parsing it is out of scope; the cross-check pass
+    backfills it from CourtListener when a match is found.
+    """
+    accession = hit.get("adsh")
+    if not accession:
+        raise ValueError("EDGAR hit missing accession number (adsh)")
+    file_date_str = hit.get("file_date")
+    if not file_date_str:
+        raise ValueError(f"EDGAR hit missing file_date: {accession}")
+    display_names = hit.get("display_names") or []
+    if not display_names:
+        raise ValueError(f"EDGAR hit missing display_names: {accession}")
+
+    name, tickers, cik = parse_edgar_display_name(display_names[0])
+
+    # Construct a stable filing-index URL from the accession number.
+    # Format: .../data/{cik_no_leading_zeros}/{accession_no_dashes}/
+    accession_no_dashes = accession.replace("-", "")
+    cik_no_leading = (cik or "").lstrip("0") or "0"
+    source_url = (
+        f"https://www.sec.gov/Archives/edgar/data/"
+        f"{cik_no_leading}/{accession_no_dashes}/"
+    )
+
+    address: Optional[dict[str, Any]] = None
+    if hit.get("biz_locations"):
+        address = {"location": hit["biz_locations"][0]}
+        if hit.get("biz_states"):
+            address["state"] = hit["biz_states"][0]
+
+    js: dict[str, Any] = {}
+    if hit.get("items"):
+        js["8k_items"] = list(hit["items"])
+    if hit.get("inc_states"):
+        js["incorporation_states"] = list(hit["inc_states"])
+    if hit.get("sics"):
+        js["sic_codes"] = list(hit["sics"])
+    if hit.get("period_ending"):
+        js["period_ending"] = hit["period_ending"]
+
+    # The 8-K body would tell us Ch 7 vs Ch 11 vs other, but parsing it is
+    # out of scope. The overwhelming majority of public-company bankruptcies
+    # are Ch 11 (reorganisation); we default to that and let the cross-check
+    # pass override if CourtListener says otherwise.
+    proceeding_type = "chapter_11"
+
+    event = BankruptcyEvent(
+        source="edgar",
+        source_record_id=accession,
+        source_url=source_url,
+        jurisdiction_country="US",
+        jurisdiction_court_id=None,  # backfilled by cross-check when CL matches
+        jurisdiction_court_name=None,
+        proceeding_type=proceeding_type,
+        case_number=None,
+        pacer_case_id=None,
+        filed_at=date.fromisoformat(file_date_str),
+        source_first_seen_at=None,
+        debtor_classification="business",
+        classification_confidence=1.0,
+        classification_method="edgar_public_company",
+        jurisdiction_specific=js,
+        raw=hit,
+    )
+
+    identifiers: dict[str, Any] = {}
+    if cik:
+        identifiers["cik"] = cik
+    if tickers:
+        identifiers["tickers"] = tickers
+
+    debtor = Debtor(
+        event_id=event.event_id,
+        name=name,
+        normalized_name=normalize_name(name),
+        entity_type=detect_entity_type(name),
+        role="primary",
+        identifiers=identifiers,
+        address=address,
+    )
+
+    return event, [debtor]
+
+
+# --- CourtListener mapper ---------------------------------------------------
+
+
 def normalize_courtlistener_result(
     result: dict[str, Any],
 ) -> tuple[BankruptcyEvent, list[Debtor]]:

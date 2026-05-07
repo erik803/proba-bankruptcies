@@ -18,7 +18,7 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 - [x] Local git repo initialized and remote configured (`origin` → erik803/proba-bankruptcies)
 - [x] Dependencies installed in `.venv` (Python 3.13.13, fastapi 0.136, sqlmodel 0.0.38, psycopg 3.3.4)
 - [x] Sanity check passes — DB connection OK, three tables visible
-- [ ] Initial commit pushed to GitHub
+- [x] Commits pushed to GitHub (3 commits: scaffold, working pilot, clustering)
 
 ## Phase 1 — Schema design
 - [x] `SCHEMA.md` written (event model, debtor model, jurisdiction-specific sidecar)
@@ -46,8 +46,10 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 - [x] Related-filing-group clustering (`bankruptcy/clustering.py`) — two-pass: explicit `joint_administration` flag from CourtListener (zero false positives), then consecutive-case-number runs among business-classified events. Surfaced 10 corporate groups including QVC (17 entities), Impac/Copperfield/Synergy (12), Finch (4)
 - [x] Re-normalization pass (`scripts/renormalize.py`) — re-runs the normalizer on stored `raw` payloads. Used to retrofit the HTML-stripping fix without re-fetching from CourtListener
 - [x] Backfill: 208 events across 4 courts (deb, nysb, txsb, cacb) and chapters 7+11
-- [ ] EDGAR 8-K Item 1.03 cross-check as second source
-- [ ] Deduplication across sources (depends on EDGAR)
+- [x] EDGAR 8-K Item 1.03 cross-check as second source — `bankruptcy/sources/edgar.py` queries the EFTS API for 8-Ks with Item 1.03 in a date window; `bankruptcy/normalize.normalize_edgar_filing` produces source='edgar' events; `bankruptcy/ingest_edgar.py` is the CLI
+- [x] Cross-check pass — `bankruptcy/crosscheck.py` matches EDGAR events to CourtListener events by date proximity (±14 days) + name-token containment (>= 1.0). On match: links into shared `related_filing_group_id`, boosts CL classification_confidence to 1.0 with method='cross_check', backfills EDGAR's court_id from the matched CL docket, copies CIK/ticker into the CL primary debtor's identifiers
+- [x] Migration 002: `jurisdiction_court_id` made nullable to support EDGAR (no court info until cross-checked)
+- [x] First successful cross-check: 7 EDGAR events ingested for 2026-04-01..2026-05-07; 2 of them (QVC Group + QVC INC) matched all 17 of CL's QVC corporate group → 19 events in one related_filing_group_id
 - [ ] Tradeoffs documented in README
 
 ## Phase 4 — Deck + README
@@ -89,3 +91,4 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 - 2026-05-07: Ingestion vertical slice working end-to-end. Discovered CourtListener's `party` array conflates the actual debtor with procedural participants like "U.S. Trustee" — normalizer now uses `caseName` as the canonical primary debtor. Joint petitions in our data appear as separate dockets (Impac group: 9 dockets, Finch group: 4 dockets), to be clustered via `related_filing_group_id` in Phase 3.
 - 2026-05-07: Phase 2 vertical slice complete. API + dashboard + alerts running end-to-end. Hit `Starlette 1.0` API change (TemplateResponse now takes request as first positional). Webhook delivery to httpbin verified. Classification heuristic deliberately doesn't pattern-match on names ("FirstName Initial LastName" looks like a person but breaks on "Keysha J. Johnson Holdings LLC") — surfaces uncertainty as `unknown` rather than guessing. Phase 3 work to harden it: EDGAR cross-check, name-registry lookup, docket-fingerprint enrichment as cases mature.
 - 2026-05-07: Backfilled 180 events from nysb/txsb/cacb. Discovered CourtListener wraps `caseName` in HTML markup (`<b><font color="red">Jointly Administered</font></b>`) for jointly-administered cases — broke entity-suffix detection for QVC's 17-entity Texas filing. Fixed normalizer to strip HTML and capture the `joint_administration` flag separately. Re-processed all 208 events in place from the stored `raw` payloads (the schema's `raw JSONB` column paid off — no re-fetching needed). Two-pass clustering now uses joint_admin as the strongest signal (no false positives), with consecutive-case-numbers among business-classified events as fallback. Also fixed a pgbouncer + psycopg3 prepared-statement conflict by setting `prepare_threshold=None`.
+- 2026-05-07: EDGAR added as second source. SEC EFTS search API → 8-K Item 1.03 filings, public-company-only fast lane (4-business-day disclosure rule beats CourtListener's PACER ingestion lag). Cross-check pass uses date proximity + token containment (containment metric, not Jaccard — Jaccard penalized parent-vs-subsidiary asymmetry; "QVC Group" with 1 token vs "QVC Vendor Development" with 3 tokens scored 0.33 in Jaccard but 1.0 in containment). 2 of 7 EDGAR events matched into existing CL groups (QVC parent → 17 QVC subsidiaries). Other 5 stand alone — their CL dockets aren't in our backfill scope.

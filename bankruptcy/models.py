@@ -23,7 +23,7 @@ class BankruptcyEvent(SQLModel, table=True):
     source_url: Optional[str] = None
 
     jurisdiction_country: str
-    jurisdiction_court_id: str
+    jurisdiction_court_id: Optional[str] = None
     jurisdiction_court_name: Optional[str] = None
 
     proceeding_type: str
