@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bankruptcy Detection Pilot</title>
+<style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.4; }
+    h1 { font-size: 1.5em; margin-bottom: 0.2em; }
+    .subtitle { color: #666; margin-bottom: 2em; font-size: 0.95em; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1em; margin-bottom: 2em; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 1em; background: #fff; }
+    .card .value { font-size: 1.8em; font-weight: 600; color: #111; }
+    .card .label { color: #666; font-size: 0.85em; margin-top: 0.2em; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-bottom: 2em; }
+    .chart-box { border: 1px solid #ddd; border-radius: 6px; padding: 1em; background: #fff; }
+    .chart-box h3 { margin: 0 0 0.6em 0; font-size: 0.95em; color: #444; }
+    .chart-canvas-wrap { position: relative; height: 240px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    th, td { text-align: left; padding: 0.5em 0.6em; border-bottom: 1px solid #eee; vertical-align: top; }
+    th { background: #fafafa; font-weight: 600; color: #555; font-size: 0.85em; }
+    tr:hover td { background: #fafbfc; }
+    .filters { margin-bottom: 1em; display: flex; gap: 0.5em; flex-wrap: wrap; align-items: center; }
+    .filters input, .filters select { padding: 0.45em 0.6em; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
+    .filters button { padding: 0.45em 1em; border: 1px solid #0066cc; background: #0066cc; color: white; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+    .filters button:hover { background: #0052a3; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .conf { font-variant-numeric: tabular-nums; color: #555; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 500; }
+    .pill-business { background: #e6f4ea; color: #1b5e20; }
+    .pill-individual { background: #fef3e6; color: #8b5a00; }
+    .pill-unknown { background: #f0f0f0; color: #666; }
+    .empty { color: #999; font-style: italic; padding: 2em; text-align: center; }
+    @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Bankruptcy Detection Pilot</h1>
+<p class="subtitle">US Chapter 7 / 11 filings from CourtListener &middot; pilot for Veridion</p>
+
+<div class="cards">
+    <div class="card"><div class="value">{{ total }}</div><div class="label">Total events</div></div>
+    <div class="card"><div class="value">{{ by_classification.get('business', 0) }}</div><div class="label">Classified business</div></div>
+    <div class="card"><div class="value">{{ by_classification.get('individual', 0) }}</div><div class="label">Classified individual</div></div>
+    <div class="card"><div class="value">{{ by_classification.get('unknown', 0) }}</div><div class="label">Unclassified</div></div>
+    <div class="card"><div class="value">{{ by_court | length }}</div><div class="label">Courts seen</div></div>
+</div>
+
+<div class="charts">
+    <div class="chart-box">
+        <h3>Filings per day (last 30 days)</h3>
+        <div class="chart-canvas-wrap"><canvas id="byDay"></canvas></div>
+    </div>
+    <div class="chart-box">
+        <h3>By court</h3>
+        <div class="chart-canvas-wrap"><canvas id="byCourt"></canvas></div>
+    </div>
+</div>
+
+<h3>Recent events</h3>
+<div class="filters">
+    <input id="filterCompany" placeholder="Company name (e.g. impac)">
+    <select id="filterClassification">
+        <option value="">all classifications</option>
+        <option value="business">business</option>
+        <option value="individual">individual</option>
+        <option value="unknown">unknown</option>
+    </select>
+    <select id="filterChapter">
+        <option value="">all chapters</option>
+        <option value="chapter_7">chapter 7</option>
+        <option value="chapter_11">chapter 11</option>
+    </select>
+    <button onclick="loadEvents()">Filter</button>
+    <span id="resultCount" style="color: #666; font-size: 0.9em;"></span>
+</div>
+<table>
+    <thead><tr>
+        <th>Filed</th><th>Court</th><th>Case #</th><th>Debtor</th><th>Type</th><th>Class</th><th>Conf</th><th>Source</th>
+    </tr></thead>
+    <tbody id="eventsBody"></tbody>
+</table>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const byDay = {{ by_day | tojson }};
+const byCourt = {{ by_court | tojson }};
+
+if (Object.keys(byDay).length > 0) {
+    new Chart(document.getElementById('byDay'), {
+        type: 'bar',
+        data: {
+            labels: Object.keys(byDay),
+            datasets: [{ label: 'filings', data: Object.values(byDay), backgroundColor: '#0066cc' }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+    });
+}
+if (Object.keys(byCourt).length > 0) {
+    new Chart(document.getElementById('byCourt'), {
+        type: 'bar',
+        data: {
+            labels: Object.keys(byCourt),
+            datasets: [{ label: 'filings', data: Object.values(byCourt), backgroundColor: '#0066cc' }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } } }
+    });
+}
+
+async function loadEvents() {
+    const company = document.getElementById('filterCompany').value;
+    const cls = document.getElementById('filterClassification').value;
+    const chap = document.getElementById('filterChapter').value;
+    const url = new URL('/bankruptcies', window.location.origin);
+    if (company) url.searchParams.set('company', company);
+    if (cls) url.searchParams.set('classification', cls);
+    if (chap) url.searchParams.set('proceeding_type', chap);
+    url.searchParams.set('limit', '100');
+
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const body = document.getElementById('eventsBody');
+    body.innerHTML = '';
+    document.getElementById('resultCount').textContent =
+        `${data.items.length} of ${data.total}`;
+
+    if (data.items.length === 0) {
+        body.innerHTML = '<tr><td colspan="8" class="empty">No matches.</td></tr>';
+        return;
+    }
+    for (const e of data.items) {
+        const debtor = e.debtors[0] || {};
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${e.filed_at}</td>
+            <td>${e.jurisdiction_court_id}</td>
+            <td>${e.case_number || ''}</td>
+            <td>${(debtor.name || '').replace(/</g, '&lt;')}</td>
+            <td>${e.proceeding_type.replace('chapter_', 'Ch ')}</td>
+            <td><span class="pill pill-${e.debtor_classification}">${e.debtor_classification}</span></td>
+            <td class="conf">${e.classification_confidence.toFixed(2)}</td>
+            <td>${e.source_url ? `<a href="${e.source_url}" target="_blank" rel="noopener">view</a>` : ''}</td>
+        `;
+        body.appendChild(tr);
+    }
+}
+
+loadEvents();
+</script>
+</body>
+</html>
