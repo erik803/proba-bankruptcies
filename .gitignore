@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local data dumps & cache
+data/raw/
+data/cache/
+*.parquet
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
