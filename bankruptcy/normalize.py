@@ -158,6 +158,245 @@ def proceeding_type_from_chapter(chapter: Any) -> str:
     return PROCEEDING_TYPE_BY_CHAPTER.get(str(chapter), "other")
 
 
+# --- 8-K body chapter extraction --------------------------------------------
+
+# Match a "Chapter N" phrase next to a phrase that strongly implies it's
+# referring to the bankruptcy filing itself (not a generic Bankruptcy Code
+# reference, not a narrative mention of "Chapter 11 process" in boilerplate).
+#
+# Patterns in priority order — first match wins. Each captures one group:
+# the chapter number as a string.
+_STRONG_CHAPTER_PATTERNS = [
+    # "voluntary petitions for relief under Chapter 11" — the canonical phrasing
+    re.compile(
+        r"(?:voluntary\s+)?petition[s]?\s+(?:for\s+relief\s+)?(?:under|pursuant\s+to)\s+chapter\s+(7|11|13|15)\b",
+        re.I,
+    ),
+    # "filed a voluntary Chapter 11 case"
+    re.compile(
+        r"\b(?:filed|commenced)\s+(?:a\s+)?(?:voluntary\s+)?chapter\s+(7|11|13|15)\s+(?:case|petition|proceeding)",
+        re.I,
+    ),
+    # "Chapter 11 of Title 11" / "Chapter 11 of the United States Bankruptcy Code"
+    re.compile(
+        r"\bchapter\s+(7|11|13|15)\s+of\s+(?:the\s+)?(?:united\s+states\s+)?(?:bankruptcy\s+code|title\s+11)",
+        re.I,
+    ),
+    # "filed for Chapter 11 protection/bankruptcy/relief"
+    re.compile(
+        r"\bfil(?:ed|ing)\s+for\s+chapter\s+(7|11|13|15)\s+(?:protection|bankruptcy|relief)",
+        re.I,
+    ),
+]
+
+# Anything that strips a tag — minimal HTML scrubber. 8-K HTML is messy but
+# the chapter mentions all live in plain narrative paragraphs; a full DOM
+# parser is overkill here.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+# Match phrases that indicate a NON-federal-bankruptcy insolvency proceeding.
+# These trigger Item 1.03 disclosure (which covers "Bankruptcy or Receivership"
+# broadly) but should not be classified as chapter_7/11/13/15. Examples in
+# the wild: Marizyme filed a Florida Chapter 727 Assignment for the Benefit
+# of Creditors — a state-law proceeding, not a federal bankruptcy case.
+_NON_FEDERAL_PATTERNS = [
+    re.compile(r"\bassignment\s+for\s+the\s+benefit\s+of\s+creditors\b", re.I),
+    re.compile(r"\b(?:state-court|state\s+court)\s+receivership\b", re.I),
+    re.compile(r"\bappointment\s+of\s+a?\s*receiver\s+(?:by|under)\s+(?:state|the\s+circuit)", re.I),
+]
+
+
+def extract_proceeding_type_from_8k_body(
+    body: Optional[str],
+) -> tuple[Optional[str], float, str]:
+    """Parse an 8-K body for the bankruptcy chapter or non-federal proceeding.
+
+    Returns `(proceeding_type, confidence, method)` where `proceeding_type`
+    is a valid schema value:
+
+    - `'chapter_7' / 'chapter_11' / 'chapter_13' / 'chapter_15'` — federal
+      bankruptcy case detected
+    - `'other'` — Item 1.03 disclosure covers a non-federal proceeding
+      (state-law Assignment for the Benefit of Creditors, state-court
+      receivership, etc.). These get filed under Item 1.03 because Item 1.03
+      reads "Bankruptcy *or Receivership*" — broader than just federal
+      bankruptcy.
+    - `None` — nothing parsable; caller decides the fallback
+
+    `confidence` reflects how strong the signal was; `method` tags which
+    rule fired (for audit / debugging).
+    """
+    if not body:
+        return None, 0.0, "no_body"
+
+    text = _HTML_TAG_RE.sub(" ", body)
+    text = _WS_RE.sub(" ", text)
+
+    # 1. Federal chapter — strong patterns (petition + chapter, Title 11, etc.)
+    for pattern in _STRONG_CHAPTER_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            chapter = match.group(1)
+            return PROCEEDING_TYPE_BY_CHAPTER.get(chapter, "other"), 0.95, "8k_body_strong"
+
+    # 2. Non-federal proceeding (state ABC, state-court receivership)
+    for pattern in _NON_FEDERAL_PATTERNS:
+        if pattern.search(text):
+            return "other", 0.9, "8k_body_state_proceeding"
+
+    # 3. Frequency fallback — many "Chapter N" mentions where one dominates
+    weak_matches = re.findall(r"\bchapter\s+(7|11|13|15)\b", text, re.I)
+    if weak_matches:
+        from collections import Counter
+
+        counts = Counter(weak_matches)
+        most_common, count = counts.most_common(1)[0]
+        total = sum(counts.values())
+        if count >= 2 and count / total >= 0.7:
+            return (
+                PROCEEDING_TYPE_BY_CHAPTER.get(most_common, "other"),
+                0.65,
+                "8k_body_frequency",
+            )
+
+    return None, 0.0, "8k_body_no_match"
+
+
+# --- 8-K body court + case-number extraction --------------------------------
+
+# Map the federal-district phrase that appears in 8-K bodies to CourtListener's
+# court_id. Covers the courts that handle ~90% of public-company Ch 11 cases
+# plus everything else we've seen in our own data. Unknown phrases return the
+# extracted court name as `jurisdiction_court_name` with `jurisdiction_court_id`
+# left None — cross-check + future runs can still match on the name.
+EDGAR_COURT_NAME_TO_CL_ID: dict[str, str] = {
+    # Most-used public-company bankruptcy venues
+    "district of delaware": "deb",
+    "southern district of new york": "nysb",
+    "southern district of texas": "txsb",
+    "central district of california": "cacb",
+    "district of new jersey": "njb",
+    "eastern district of virginia": "vaeb",
+    "northern district of illinois": "ilnb",
+    # Long tail we've actually seen in our own data
+    "middle district of florida": "flmb",
+    "southern district of florida": "flsb",
+    "northern district of california": "canb",
+    "eastern district of california": "caeb",
+    "southern district of california": "casb",
+    "northern district of texas": "txnb",
+    "western district of texas": "txwb",
+    "eastern district of new york": "nyeb",
+    "northern district of georgia": "ganb",
+    "eastern district of north carolina": "nceb",
+    "western district of washington": "wawb",
+    "district of arizona": "arb",  # CL uses 'ar' for Arizona, not the standard 'az'
+    "district of colorado": "cob",
+    "western district of pennsylvania": "pawb",
+    "district of massachusetts": "mab",
+    "district of columbia": "dcb",
+    "northern district of alabama": "alnb",
+    "eastern district of michigan": "mieb",
+    "middle district of tennessee": "tnmb",
+    "eastern district of tennessee": "tneb",
+    "northern district of ohio": "ohnb",
+    "southern district of ohio": "ohsb",
+    "district of puerto rico": "prb",
+    "eastern district of missouri": "moeb",
+    "eastern district of oklahoma": "okeb",
+    "western district of oklahoma": "okwb",
+    "northern district of oklahoma": "oknb",
+}
+
+# Match the court phrase that 8-Ks use to introduce the venue. Two shapes:
+#   "United States Bankruptcy Court for the Southern District of Texas"
+#   "United States Bankruptcy Court for the District of Delaware"
+# Capture the district phrase so we can map to CL.
+_COURT_PHRASE_RE = re.compile(
+    r"United\s+States\s+Bankruptcy\s+Court\s+for\s+the\s+"
+    r"((?:Northern|Southern|Eastern|Western|Middle|Central)\s+)?"
+    r"District\s+of\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)",
+    re.I,
+)
+
+# Match a case number like "Case No. 25-90807" or "Case Number 26-10708 (XYZ)".
+# Two-digit year prefix, dash, 4-6 digit serial, optional judge initials in
+# parens. The (CML) / (KBO) suffix is the assigned judge's initials, not part
+# of the case number — strip it from the captured group.
+_CASE_NUMBER_RE = re.compile(
+    r"Case\s+(?:No\.?|Number)\s*[:\s]*\s*"
+    r"(\d{2}-\d{4,6})",  # e.g. 26-90346 or 25-90807
+    re.I,
+)
+
+
+def extract_court_and_case_from_8k_body(
+    body: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str], str]:
+    """Parse an 8-K body for the bankruptcy court name + CL court_id + case number.
+
+    Returns `(court_id, court_name, case_number, method)`:
+
+    - `court_id`: CourtListener-style court ID (e.g. "txsb"), or None when
+      the body names a court we don't have in our mapping (court_name is
+      still returned so consumers see *some* venue info)
+    - `court_name`: the canonical "United States Bankruptcy Court..." phrase
+      as it appears in the body, or None when no court phrase fires
+    - `case_number`: the matched docket like "26-90346", or None
+    - `method`: which signals fired, used for audit / debugging. One of
+      `8k_body_court_and_case`, `8k_body_court_only`, `8k_body_case_only`,
+      `8k_body_no_match`, `no_body`
+    """
+    if not body:
+        return None, None, None, "no_body"
+
+    text = _HTML_TAG_RE.sub(" ", body)
+    text = _WS_RE.sub(" ", text)
+    # HTML entities (e.g. "&#160;" for non-breaking space) survive tag-strip
+    # and break "District&#160;of&#160;Texas". A targeted swap is cheaper
+    # than html.unescape on a 60kb body.
+    text = text.replace("&#160;", " ").replace("&nbsp;", " ")
+    text = _WS_RE.sub(" ", text)
+
+    court_id: Optional[str] = None
+    court_name: Optional[str] = None
+    court_match = _COURT_PHRASE_RE.search(text)
+    if court_match:
+        direction = (court_match.group(1) or "").strip().lower()
+        state = court_match.group(2).strip()
+        # Normalize multi-word states; the mapping key has no extra spaces.
+        district_phrase = (
+            f"{direction} district of {state}".strip().lower()
+            if direction
+            else f"district of {state}".lower()
+        )
+        # Re-canonicalize whitespace so the lookup key matches.
+        district_phrase = " ".join(district_phrase.split())
+        court_id = EDGAR_COURT_NAME_TO_CL_ID.get(district_phrase)
+        # Always return the canonical court name — useful even when court_id
+        # lookup misses, since the cross-check can fall back to name matching.
+        court_name = (
+            f"United States Bankruptcy Court for the "
+            f"{direction.title() + ' ' if direction else ''}District of {state}"
+        ).strip()
+
+    case_match = _CASE_NUMBER_RE.search(text)
+    case_number = case_match.group(1) if case_match else None
+
+    if court_name and case_number:
+        method = "8k_body_court_and_case"
+    elif court_name:
+        method = "8k_body_court_only"
+    elif case_number:
+        method = "8k_body_case_only"
+    else:
+        method = "8k_body_no_match"
+
+    return court_id, court_name, case_number, method
+
+
 # --- Main mapper ------------------------------------------------------------
 
 COURTLISTENER_BASE = "https://www.courtlistener.com"
@@ -206,6 +445,7 @@ def parse_edgar_display_name(
 
 def normalize_edgar_filing(
     hit: dict[str, Any],
+    body: Optional[str] = None,
 ) -> tuple[BankruptcyEvent, list[Debtor]]:
     """Map an EDGAR EFTS hit (8-K with Item 1.03) to BankruptcyEvent + Debtor.
 
@@ -214,6 +454,13 @@ def normalize_edgar_filing(
     Court information is left blank — the 8-K body usually names the
     bankruptcy court, but parsing it is out of scope; the cross-check pass
     backfills it from CourtListener when a match is found.
+
+    If `body` is provided, we parse it for the chapter / non-federal
+    proceeding type — this distinguishes a real Chapter 11 from a state-law
+    Assignment for the Benefit of Creditors (which also files an Item 1.03
+    8-K). When `body` is None or parsing yields no signal, we fall back to
+    the historical default (`chapter_11`) with reduced confidence — public
+    company bankruptcies are overwhelmingly Ch 11 in practice.
     """
     accession = hit.get("adsh")
     if not accession:
@@ -252,21 +499,38 @@ def normalize_edgar_filing(
     if hit.get("period_ending"):
         js["period_ending"] = hit["period_ending"]
 
-    # The 8-K body would tell us Ch 7 vs Ch 11 vs other, but parsing it is
-    # out of scope. The overwhelming majority of public-company bankruptcies
-    # are Ch 11 (reorganisation); we default to that and let the cross-check
-    # pass override if CourtListener says otherwise.
-    proceeding_type = "chapter_11"
+    # Parse the 8-K body for the actual proceeding type when we have it.
+    # On no body / no signal, default to chapter_11 (public-company
+    # bankruptcies are overwhelmingly Ch 11) and record the lower confidence
+    # in jurisdiction_specific.
+    proceeding_type, pt_confidence, pt_method = extract_proceeding_type_from_8k_body(body)
+    if proceeding_type is None:
+        proceeding_type = "chapter_11"
+        # pt_method already reflects 'no_body' or '8k_body_no_match'; the
+        # confidence (0.0) tells consumers this is a default, not a parse.
+    js["proceeding_type_method"] = pt_method
+    js["proceeding_type_confidence"] = pt_confidence
+
+    # Extract court name + case number from the same body. Falls back to
+    # None when the 8-K is a non-federal proceeding (e.g. Marizyme's state
+    # ABC) or when our court-name map doesn't recognize the district.
+    court_id_from_body, court_name_from_body, case_number_from_body, court_method = (
+        extract_court_and_case_from_8k_body(body)
+    )
+    js["court_extraction_method"] = court_method
 
     event = BankruptcyEvent(
         source="edgar",
         source_record_id=accession,
         source_url=source_url,
         jurisdiction_country="US",
-        jurisdiction_court_id=None,  # backfilled by cross-check when CL matches
-        jurisdiction_court_name=None,
+        # Body parse populates these directly when the 8-K names the venue
+        # and case number. Cross-check still acts as a backup to fill these
+        # in from a matched CL docket when body extraction misses.
+        jurisdiction_court_id=court_id_from_body,
+        jurisdiction_court_name=court_name_from_body,
         proceeding_type=proceeding_type,
-        case_number=None,
+        case_number=case_number_from_body,
         pacer_case_id=None,
         filed_at=date.fromisoformat(file_date_str),
         source_first_seen_at=None,
@@ -304,7 +568,17 @@ def normalize_courtlistener_result(
 ) -> tuple[BankruptcyEvent, list[Debtor]]:
     """Map a CourtListener `/api/rest/v4/search/?type=r` result to our domain models.
 
-    Raises ValueError if a critical field (`docket_id`, `dateFiled`) is missing.
+    Raises ValueError if a critical field (`docket_id`, `dateFiled`) is missing,
+    or if the row is one of CourtListener's known garbage shapes:
+      - `caseName == "Miscellaneous Entry"` — PACER administrative placeholders
+        (40 of these landed in a single ingest with synthetic `dateFiled` of
+        2029-01-01, all named identically; they're not real bankruptcies)
+      - `dateFiled` in the implausible future (years > today + 1) — data entry
+        typos at the court level (we saw e.g. `2079-11-23` for a 2021 filing)
+
+    Both are filtered at ingest rather than handled downstream because they
+    pollute aggregates (max-date, chart axes, watermark) in ways that are
+    expensive to fix once they're in the DB.
     """
     if "docket_id" not in result:
         raise ValueError("result missing docket_id")
@@ -312,6 +586,22 @@ def normalize_courtlistener_result(
     if not filed_at_str:
         raise ValueError(f"result missing dateFiled (docket_id={result.get('docket_id')})")
 
+    # Skip PACER administrative placeholders. CL exposes these via the search
+    # API but they're not real cases — they're bulk-entry artifacts.
+    if (result.get("caseName") or "").strip().lower() == "miscellaneous entry":
+        raise ValueError(
+            f"pacer placeholder 'Miscellaneous Entry' (docket_id={result.get('docket_id')})"
+        )
+
+    # Reject implausible future filed_at — typo in the upstream record.
+    parsed_filed = date.fromisoformat(filed_at_str)
+    if parsed_filed.year > date.today().year + 1:
+        raise ValueError(
+            f"implausible future dateFiled={filed_at_str} "
+            f"(docket_id={result.get('docket_id')})"
+        )
+
+    # `parsed_filed` already validated above.
     chapter_raw = result.get("chapter")
     chapter = str(chapter_raw) if chapter_raw is not None else ""
 
@@ -335,7 +625,7 @@ def normalize_courtlistener_result(
         "proceeding_type": proceeding_type_from_chapter(chapter),
         "case_number": result.get("docketNumber"),
         "pacer_case_id": result.get("pacer_case_id"),
-        "filed_at": date.fromisoformat(filed_at_str),
+        "filed_at": parsed_filed,
         "source_first_seen_at": _parse_iso_datetime(
             (result.get("meta") or {}).get("date_created")
         ),

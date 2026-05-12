@@ -116,6 +116,15 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/about", response_class=HTMLResponse, tags=["dashboard"])
+def about(request: Request) -> Any:
+    """Static explainer page — what each field on the dashboard means.
+
+    Linked from the dashboard nav. Purely informational; no data queries.
+    """
+    return templates.TemplateResponse(request, "about.html", {})
+
+
 @app.get("/bankruptcies", response_model=EventListResponse, tags=["events"])
 def list_bankruptcies(
     company: str | None = Query(None, description="Substring match on debtor name (case-insensitive)"),

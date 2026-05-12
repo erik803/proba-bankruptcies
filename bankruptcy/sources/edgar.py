@@ -36,9 +36,10 @@ def _is_retryable(exc: BaseException) -> bool:
 
 
 class EdgarClient:
-    """Async client for SEC EDGAR full-text search."""
+    """Async client for SEC EDGAR full-text search + filing body fetch."""
 
     BASE_URL = "https://efts.sec.gov/LATEST/search-index"
+    ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
     DEFAULT_USER_AGENT = "Bankruptcy Pilot ernstfranciscerik@gmail.com"
 
     def __init__(
@@ -68,6 +69,39 @@ class EdgarClient:
         response = await self._http.get(self.BASE_URL, params=params, headers=headers)
         response.raise_for_status()
         return response.json()
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    async def fetch_filing_body(
+        self,
+        accession: str,
+        primary_doc: str,
+        cik: str,
+    ) -> Optional[str]:
+        """Fetch the raw HTML body of an 8-K filing.
+
+        EDGAR's archive URL is `{ARCHIVES_BASE}/{cik_no_leading_zeros}/{accession_no_dashes}/{primary_doc}`.
+        Returns the response text, or None on a 404 (filing was withdrawn
+        or never indexed). 4xx other than 404 raises — that's a bug in our
+        URL construction, not a missing filing.
+
+        Respects SEC's fair-access policy (User-Agent header, low req rate —
+        callers should not parallelize aggressively; the daily ingest rate
+        is well under the 10 req/sec cap).
+        """
+        accession_no_dashes = accession.replace("-", "")
+        cik_no_leading = cik.lstrip("0") or "0"
+        url = f"{self.ARCHIVES_BASE}/{cik_no_leading}/{accession_no_dashes}/{primary_doc}"
+        headers = {"User-Agent": self._user_agent}
+        response = await self._http.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.text
 
     async def search_bankruptcy_8k(
         self,

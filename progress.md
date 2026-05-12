@@ -84,6 +84,16 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 ## Scheduled follow-ups
 - **~2026-05-15 (Fri) or later:** re-run `python -m bankruptcy.ingest_edgar --start 2026-05-11 --end 2026-05-16` and then `python -m bankruptcy.crosscheck`. Spanish Broadcasting System filed Ch 11 in Delaware on 2026-05-11 with 52 subsidiary entities — captured in CourtListener already, but the SEC 8-K Item 1.03 disclosure deadline is 4 business days (Fri 2026-05-15). When the 8-K lands in EDGAR, the cross-check pass should auto-link it into the existing 52-entity SBS group, demonstrating the fast-lane/broad-lane pattern end-to-end on a fresh major filing.
 
+## Presentation reminders (deck prep)
+
+Things that are **deliberately documented but not built** — they live in the slides, not in code. Don't forget to cover them:
+
+- **Hosting / deployment story.** The pilot runs locally; production would be Cloud Run job (ingest) + Cloud Run service (API+dashboard) + Cloud Scheduler. See `DECISIONS.md §4.4` for the full rationale. Slide talking points: brief asks for local setup, demoing locally is more reliable in an interview, the architecture is sized for the deploy but the deploy itself is mechanical work with no design judgment.
+- **Watermark default behavior.** Currently `--use-watermark` is **opt-in** (default off, preserves existing manual workflows). In production this should flip to **opt-out** (default on, `--no-watermark` for manual overrides). See `DECISIONS.md §1.7`. **Important to flip when we wire this up to a real scheduler.**
+- **8-K body parsing.** Implemented; see `DECISIONS.md §1.5` for the design + accuracy story.
+- **News as third source / GDELT layer.** Not built. Documented in `DECISIONS.md §11` as the next major source.
+- **Alerts via n8n.** Currently a direct webhook POST. n8n is the planned next step for fan-out, formatting, and multi-channel delivery — but it's a *product* decision (when we have multiple subscribers), not a pilot necessity.
+
 ## Notes & decisions log
 
 See `DECISIONS.md` for design rationale (gitignored personal study aid; defers to that file as the single source of truth).

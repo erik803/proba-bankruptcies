@@ -89,3 +89,25 @@ class AlertDelivery(SQLModel, table=True):
     http_status: Optional[int] = None
     retry_count: int = 0
     last_error: Optional[str] = None
+
+
+class IngestWatermark(SQLModel, table=True):
+    """High-watermark for incremental polling, one row per source.
+
+    `last_event_date` is the max `filed_at` we've successfully ingested. Next
+    run queries `filed_after = last_event_date - lookback_days` to catch
+    late-arriving filings (CourtListener can backfill PACER for a few days).
+    Dedup via `(source, source_record_id)` UNIQUE on `bankruptcy_event` makes
+    the overlap safe.
+
+    See DECISIONS.md §1.7 for the design rationale.
+    """
+
+    __tablename__ = "ingest_watermark"
+
+    source: str = Field(primary_key=True)
+    last_event_date: date
+    last_run_at: datetime = Field(default_factory=utc_now)
+    last_run_status: str = "success"
+    last_event_count: int = 0
+    lookback_days: int = 7

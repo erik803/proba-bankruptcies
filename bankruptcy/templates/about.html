@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About &middot; Bankruptcy Detection Pilot</title>
+<style>
+    :root {
+        --bg: #F5F4F0;
+        --surface: #FFFFFF;
+        --border: #E8E6E1;
+        --text: #1A1A1A;
+        --text-muted: #5A5A5A;
+        --text-faint: #8A8782;
+        --accent: #FF6028;
+        --accent-soft: #FFE4D8;
+        --blue: #2240FF;
+        --green: #37A26B;
+        --yellow: #FFC93C;
+        --magenta: #9B4DFF;
+    }
+    * { box-sizing: border-box; }
+    html { scrollbar-gutter: stable; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+        max-width: 760px;
+        margin: 2.5em auto;
+        padding: 0 1.25em 4em;
+        color: var(--text);
+        line-height: 1.55;
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+    }
+    .nav {
+        font-size: 0.9em;
+        color: var(--text-muted);
+        margin-bottom: 1.75em;
+    }
+    .nav a {
+        color: var(--blue);
+        text-decoration: none;
+        font-weight: 500;
+    }
+    .nav a:hover { text-decoration: underline; }
+    h1 {
+        font-size: 2em;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.25em 0;
+    }
+    .subtitle {
+        color: var(--text-muted);
+        margin: 0 0 2.25em 0;
+        font-size: 1em;
+    }
+    h2 {
+        font-size: 1.15em;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 2em 0 0.6em 0;
+        color: var(--text);
+        border-top: 1px solid var(--border);
+        padding-top: 1.6em;
+    }
+    h2:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+    p { margin: 0.55em 0; }
+    .lede { color: var(--text-muted); }
+    .term {
+        font-weight: 600;
+        color: var(--text);
+    }
+    code, .pill {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 0.88em;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.45em;
+        border-radius: 4px;
+        color: var(--text);
+    }
+    .pill {
+        font-weight: 600;
+        font-size: 0.78em;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .pill-edgar {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+    .example {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 6px;
+        padding: 0.7em 1em;
+        margin: 0.7em 0;
+        font-size: 0.93em;
+        color: var(--text-muted);
+    }
+    .example strong { color: var(--text); }
+    .source-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1em;
+        margin: 0.6em 0;
+    }
+    .source-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.9em 1em;
+    }
+    .source-card h3 {
+        font-size: 1em;
+        margin: 0 0 0.3em 0;
+        font-weight: 600;
+    }
+    .source-card p {
+        margin: 0;
+        color: var(--text-muted);
+        font-size: 0.9em;
+    }
+    @media (max-width: 600px) {
+        .source-grid { grid-template-columns: 1fr; }
+    }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="/">&larr; Back to dashboard</a></div>
+
+<h1>About this data</h1>
+<p class="subtitle">A short guide to what each field on the dashboard means.</p>
+
+<h2>What is a bankruptcy event, here?</h2>
+<p>One row in our database represents <em>one filing from one source</em> &mdash; not "one company's bankruptcy". A large bankruptcy like QVC's involves 17 separate corporate entities, each with its own court docket, plus 2 SEC disclosures from the parent and a holding company. That's <strong>19 rows</strong> in our data, all linked into one corporate group. The grouping happens after ingestion so we don't have to decide what's "the same event" before we have all the evidence.</p>
+
+<h2>Where the data comes from</h2>
+<div class="source-grid">
+    <div class="source-card">
+        <h3>CourtListener</h3>
+        <p>The broad lane. Pulls every Chapter 7 and Chapter 11 docket from all 95 US federal bankruptcy courts. Most events come from here. Latency: hours to a day, depending on how fast PACER feeds it through.</p>
+    </div>
+    <div class="source-card">
+        <h3>SEC EDGAR <span class="pill pill-edgar">EDGAR</span></h3>
+        <p>The fast lane. Pulls 8-K Item 1.03 filings &mdash; the disclosure a public company must file within 4 business days of declaring bankruptcy. Smaller coverage (public companies only) but lower latency than the court system.</p>
+    </div>
+</div>
+
+<h2>Proceeding types</h2>
+<p>The kind of legal process under way. The first four are the federal "chapters" of the US Bankruptcy Code; <code>other</code> covers everything else.</p>
+<p><span class="term"><code>chapter_7</code> &middot; Liquidation.</span> The debtor's assets are sold off to pay creditors. Common for individuals and for small businesses winding down.</p>
+<p><span class="term"><code>chapter_11</code> &middot; Reorganisation.</span> The debtor keeps operating while restructuring its debts under court supervision. The default for large public-company bankruptcies (QVC, Cumulus Media, Office Properties Income Trust).</p>
+<p><span class="term"><code>chapter_13</code> &middot; Wage-earner repayment.</span> Reserved by law for individuals with regular income. We classify these as <code>individual</code> automatically.</p>
+<p><span class="term"><code>chapter_15</code> &middot; Foreign main proceeding.</span> Rare. Used when a foreign company in bankruptcy abroad seeks recognition in a US court.</p>
+<p><span class="term"><code>other</code> &middot; Not a federal chapter.</span> The SEC's Item 1.03 covers "Bankruptcy <em>or Receivership</em>" &mdash; broader than just federal bankruptcy. So Item 1.03 8-Ks sometimes disclose state-law insolvency processes that aren't a chapter case at all.</p>
+<div class="example"><strong>Example:</strong> Marizyme, Inc filed an Item 1.03 8-K in April 2026. Without reading the body, we'd assume Chapter 11. Reading the body shows it's actually a Florida state-law <em>Assignment for the Benefit of Creditors</em> &mdash; a different legal process entirely. We flag those as <code>other</code> rather than misclassifying them as Chapter 11.</div>
+
+<h2>Debtor classification</h2>
+<p>Whether the debtor is a business or an individual. There's no field in the source data that tells us &mdash; we infer it from the debtor's name (corporate suffixes like "Inc", "LLC"), the kinds of docket entries on the case, and, for public companies, whether they show up in SEC EDGAR.</p>
+<p><span class="term"><code>business</code></span> &mdash; corporate entity. The pilot's primary interest.</p>
+<p><span class="term"><code>individual</code></span> &mdash; person filing for personal bankruptcy. Usually filtered out by downstream consumers.</p>
+<p><span class="term"><code>unknown</code></span> &mdash; we couldn't confidently say. <em>This is honest, not lazy</em>: the classifier is conservative on purpose. Around 30% of events sit here. A more aggressive classifier would over-include consumer cases as "business".</p>
+
+<h2>Classification confidence</h2>
+<p>A 0.0&ndash;1.0 number that says how strong the evidence behind the classification is. Treat it as <em>data</em>, not just a debug field &mdash; the API lets callers filter by it (<code>?min_confidence=0.8</code>) to dial up precision.</p>
+<p><span class="term">1.0</span> &mdash; cross-source confirmed. The same debtor appears in both EDGAR and CourtListener, or directly in EDGAR (public companies are businesses by definition).</p>
+<p><span class="term">0.95</span> &mdash; strong single-source signal. E.g. a Chapter 13 case (legally individual-only).</p>
+<p><span class="term">0.8</span> &mdash; reasonable but heuristic. E.g. a name ending in "Inc" or "LLC".</p>
+<p><span class="term">0.0</span> &mdash; no signal fired; classified as <code>unknown</code>.</p>
+
+<h2>Cross-source confirmed (the <span class="pill pill-edgar">EDGAR</span> badge)</h2>
+<p>When you see an EDGAR badge on an event, it means that bankruptcy was confirmed by <em>two</em> independent sources: the federal court docket (CourtListener) and the SEC disclosure (EDGAR Item 1.03 8-K). When both agree, our classification confidence jumps to 1.0 and we copy the company's CIK and stock ticker onto the record.</p>
+<p>Cross-source matching uses two strategies. The first is direct: when the 8-K names a court and case number, we match those to a CourtListener docket by primary key. The second is by name and date when those aren't available.</p>
+<div class="example"><strong>Example:</strong> QVC's parent (QVC Group, Inc, ticker QVCGA) filed a single 8-K. CourtListener has 17 separate dockets for QVC and its subsidiaries. Cross-check links the 8-K to the whole group of 17, so the dashboard shows one logical corporate event with 19 rows behind it.</div>
+
+<h2>Corporate groups (the "Group size" column)</h2>
+<p>When a large company files for bankruptcy, the parent and each subsidiary usually file separately. They all become one logical event, but they're 5, 17, or 52 separate court rows. The "Group size" column on the dashboard tells you how many entities share the parent's filing.</p>
+<p>Detection uses two signals: an explicit "Jointly Administered" flag from the court docket (zero false positives), and consecutive case numbers among business-classified events on the same day in the same court (corporate groups tend to file in batches, so their case numbers are sequential).</p>
+<div class="example"><strong>Example:</strong> The largest group in our data is a 52-entity Delaware filing from 2026-05-11 (Spanish Broadcasting System, case numbers 26-10708 through 26-10766). QVC is 17 entities. Most groups are 2&ndash;5 entities.</div>
+
+<h2>Why some fields say "unknown" or are empty</h2>
+<p>An event can be missing a court ID, a case number, or a confident classification for legitimate reasons:</p>
+<p>&middot; <strong>EDGAR-only events</strong> can pre-date CourtListener's ingestion by hours or days. If you're seeing an event with the EDGAR badge but no court, CourtListener probably hasn't caught up yet &mdash; we'll fill it in on the next poll once the docket appears.</p>
+<p>&middot; <strong>State-law proceedings</strong> like the Marizyme example don't have a federal court at all. They live in state courts that aren't in our data sources.</p>
+<p>&middot; <strong>Conservative classification</strong> on names we can't disambiguate. "NB Element DTS" is a real example &mdash; it could be a business or an individual's stage name; without a "Inc"/"LLC" suffix we leave it as <code>unknown</code> rather than guess.</p>
+
+</body>
+</html>

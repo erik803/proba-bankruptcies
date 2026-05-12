@@ -18,6 +18,13 @@ Classification upgrades made by downstream passes (cross_check,
 edgar_public_company) are preserved — renormalize only restores the
 *base* classification from the normalizer, not the post-pass overrides.
 
+EDGAR `proceeding_type`, `jurisdiction_court_id`, `jurisdiction_court_name`,
+and `case_number` (set by `scripts/reparse_edgar_bodies.py` from the 8-K
+body) are also preserved when the previous run produced a real parse — we
+don't have the body in this pass, so we'd just clobber real values with
+defaults / None. Detect via `jurisdiction_specific.proceeding_type_method`
+or `court_extraction_method` starting with `8k_body_`.
+
 Usage:
     python -u scripts/renormalize.py
 """
@@ -106,13 +113,61 @@ def main() -> None:
                 conf = new_event.classification_confidence
                 method = new_event.classification_method
 
-            event_updates.append({
-                "event_id": event.event_id,
-                "debtor_classification": cls,
-                "classification_confidence": conf,
-                "classification_method": method,
-                "jurisdiction_specific": new_event.jurisdiction_specific,
-            })
+            # Preserve real 8-K body parses — without the body in this pass
+            # we'd clobber state-ABC detection, court_id, and case_number
+            # with the normalizer's defaults. Detect via the method tags
+            # we stamped into jurisdiction_specific during the body parse.
+            existing_js = event.jurisdiction_specific or {}
+            existing_pt_method = existing_js.get("proceeding_type_method", "")
+            existing_court_method = existing_js.get("court_extraction_method", "")
+            preserved_pt = (
+                isinstance(existing_pt_method, str)
+                and existing_pt_method.startswith("8k_body_")
+            )
+            preserved_court = (
+                isinstance(existing_court_method, str)
+                and existing_court_method.startswith("8k_body_")
+                and existing_court_method != "8k_body_no_match"
+            )
+
+            if preserved_pt or preserved_court:
+                merged_js = dict(new_event.jurisdiction_specific or {})
+                if preserved_pt:
+                    merged_js["proceeding_type_method"] = existing_pt_method
+                    merged_js["proceeding_type_confidence"] = existing_js.get(
+                        "proceeding_type_confidence"
+                    )
+                if preserved_court:
+                    merged_js["court_extraction_method"] = existing_court_method
+                event_updates.append({
+                    "event_id": event.event_id,
+                    "debtor_classification": cls,
+                    "classification_confidence": conf,
+                    "classification_method": method,
+                    "proceeding_type": (
+                        event.proceeding_type if preserved_pt else new_event.proceeding_type
+                    ),
+                    "jurisdiction_court_id": (
+                        event.jurisdiction_court_id
+                        if preserved_court else new_event.jurisdiction_court_id
+                    ),
+                    "jurisdiction_court_name": (
+                        event.jurisdiction_court_name
+                        if preserved_court else new_event.jurisdiction_court_name
+                    ),
+                    "case_number": (
+                        event.case_number if preserved_court else new_event.case_number
+                    ),
+                    "jurisdiction_specific": merged_js,
+                })
+            else:
+                event_updates.append({
+                    "event_id": event.event_id,
+                    "debtor_classification": cls,
+                    "classification_confidence": conf,
+                    "classification_method": method,
+                    "jurisdiction_specific": new_event.jurisdiction_specific,
+                })
 
             primary = primary_by_event.get(event.event_id)
             if primary and new_debtors:

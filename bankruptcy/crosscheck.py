@@ -21,16 +21,29 @@ by the same (or related) entity within ±14 days. When a match is found:
 Idempotent: only EDGAR events without a group are considered, so re-running
 on cross-checked data is a no-op.
 
-Matching algorithm:
-  - Date proximity: |EDGAR.filed_at - CL.filed_at| <= 14 days. Wider than
-    the 4-business-day SEC rule because CL latency from PACER can vary.
-  - Name similarity: containment >= 1.0 on significant tokens (corporate
-    stopwords like 'inc', 'llc', 'group', 'holdings' filtered out).
-    Containment = |A ∩ B| / min(|A|, |B|); threshold 1.0 means one token
-    set must be a strict subset of the other. Chosen over Jaccard because
-    cross-source name matching is fundamentally asymmetric — EDGAR has
-    the parent name (few tokens) and CL has the subsidiary names (more
-    tokens), and Jaccard penalizes that asymmetry.
+Matching algorithm — two passes in priority order:
+
+  1. **Case-number match** (high precision, no date window). When the EDGAR
+     event has both a `jurisdiction_court_id` and a `case_number` (both
+     extracted from the 8-K body), look for a CL event with the same
+     `(court_id, case_number)`. Federal case numbers are unique inside a
+     court, so this is essentially a primary-key match. Skips the date
+     window entirely — Luminar's 8-K was filed Apr 2026 but their actual
+     bankruptcy docket is from Dec 2025; case number is the only signal
+     that survives that gap.
+  2. **Name + date match** (fallback). For EDGAR events without a case
+     number or whose case-number lookup misses, fall back to:
+     - Date proximity: |EDGAR.filed_at - CL.filed_at| <= 14 days. Wider
+       than the 4-business-day SEC rule because CL latency from PACER
+       can vary.
+     - Name similarity: containment >= 1.0 on significant tokens
+       (corporate stopwords like 'inc', 'llc', 'group', 'holdings'
+       filtered out). Containment = |A ∩ B| / min(|A|, |B|); threshold
+       1.0 means one token set must be a strict subset of the other.
+       Chosen over Jaccard because cross-source name matching is
+       fundamentally asymmetric — EDGAR has the parent name (few tokens)
+       and CL has the subsidiary names (more tokens), and Jaccard
+       penalizes that asymmetry.
 """
 
 import logging
@@ -143,6 +156,16 @@ def crosscheck(session: Session) -> tuple[int, int]:
         if cl_e.event_id in primary_debtor_by_event
     }
 
+    # Lookup table for the case-number fast-path: (court_id, case_number) → CL event.
+    # Federal bankruptcy case numbers are unique within a court, so this is
+    # effectively a primary-key index. Only populate for CL events where both
+    # fields are present (case_number is NOT NULL on bankruptcy dockets by
+    # convention but worth defending against bad data).
+    cl_by_court_case: dict[tuple[str, str], BankruptcyEvent] = {}
+    for cl_e in cl_events:
+        if cl_e.jurisdiction_court_id and cl_e.case_number:
+            cl_by_court_case[(cl_e.jurisdiction_court_id, cl_e.case_number)] = cl_e
+
     matches = 0
     links_made = 0
 
@@ -150,32 +173,60 @@ def crosscheck(session: Session) -> tuple[int, int]:
         edgar_d = primary_debtor_by_event.get(edgar_e.event_id)
         if not edgar_d:
             continue
-        edgar_tokens = significant_tokens(edgar_d.normalized_name)
-        if not edgar_tokens:
-            logger.info(
-                "skip edgar %s '%s' — no significant tokens",
-                edgar_e.source_record_id,
-                edgar_d.name,
-            )
-            continue
 
         candidates: list[tuple[float, BankruptcyEvent, Debtor]] = []
-        for cl_e in cl_events:
-            if abs((cl_e.filed_at - edgar_e.filed_at).days) > DATE_WINDOW_DAYS:
-                continue
-            cl_tokens = cl_tokens_by_event.get(cl_e.event_id)
-            if not cl_tokens:
-                continue
-            score = containment_similarity(edgar_tokens, cl_tokens)
-            if score >= CONTAINMENT_THRESHOLD:
-                candidates.append((score, cl_e, primary_debtor_by_event[cl_e.event_id]))
+
+        # Pass 1: case-number match. Skips the date window entirely because
+        # 8-K disclosure date and docket filing date can diverge (Luminar's
+        # docket is Dec 2025 but the disclosing 8-K is Apr 2026).
+        if edgar_e.jurisdiction_court_id and edgar_e.case_number:
+            cn_match = cl_by_court_case.get(
+                (edgar_e.jurisdiction_court_id, edgar_e.case_number)
+            )
+            if cn_match and cn_match.event_id in primary_debtor_by_event:
+                # Confidence 2.0 to mark "stronger than any name match" in
+                # the sort below — the score is internal-only and doesn't
+                # persist anywhere.
+                candidates.append(
+                    (2.0, cn_match, primary_debtor_by_event[cn_match.event_id])
+                )
+                logger.info(
+                    "case# match | edgar %s case=%s court=%s -> CL %s",
+                    edgar_e.source_record_id,
+                    edgar_e.case_number,
+                    edgar_e.jurisdiction_court_id,
+                    cn_match.source_record_id,
+                )
+
+        # Pass 2: name + date match. Always run — even when case-number
+        # matched, name matching may pick up *additional* subsidiary dockets
+        # in the same corporate group (e.g. QVC has 17 subsidiaries on
+        # separate case numbers, but only the parent is in the 8-K).
+        edgar_tokens = significant_tokens(edgar_d.normalized_name)
+        if edgar_tokens:
+            for cl_e in cl_events:
+                if abs((cl_e.filed_at - edgar_e.filed_at).days) > DATE_WINDOW_DAYS:
+                    continue
+                cl_tokens = cl_tokens_by_event.get(cl_e.event_id)
+                if not cl_tokens:
+                    continue
+                score = containment_similarity(edgar_tokens, cl_tokens)
+                if score >= CONTAINMENT_THRESHOLD:
+                    # Avoid duplicating the case# match if name+date hits it too.
+                    if any(c[1].event_id == cl_e.event_id for c in candidates):
+                        continue
+                    candidates.append(
+                        (score, cl_e, primary_debtor_by_event[cl_e.event_id])
+                    )
 
         if not candidates:
             logger.info(
-                "no match for edgar %s '%s' (tokens=%s)",
+                "no match for edgar %s '%s' (tokens=%s, case=%s court=%s)",
                 edgar_e.source_record_id,
                 edgar_d.name,
-                sorted(edgar_tokens),
+                sorted(edgar_tokens) if edgar_tokens else [],
+                edgar_e.case_number,
+                edgar_e.jurisdiction_court_id,
             )
             continue
 
