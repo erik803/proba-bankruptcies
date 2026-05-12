@@ -79,8 +79,10 @@ async def ingest_filter(
     filed_before: Optional[str],
     max_results: int,
     dry_run: bool,
-) -> tuple[int, int, int, Optional[date]]:
-    """Returns (inserted, skipped, errors, max_filed_at) for one filter combination.
+    skip_individual: bool = False,
+    progress_every: int = 200,
+) -> tuple[int, int, int, int, Optional[date]]:
+    """Returns (inserted, skipped, errors, skipped_individual, max_filed_at).
 
     `court=None` runs a nationwide search (one API call, scans all 95 courts).
     Otherwise runs a per-court search.
@@ -88,8 +90,20 @@ async def ingest_filter(
     `max_filed_at` is the latest `filed_at` seen across all yielded results
     (including ones we skipped as duplicates), so callers can advance the
     watermark even when a poll returned only already-seen events.
+
+    `skip_individual`: when True, don't insert events whose normalizer
+    classification is `individual` (Chapter 13 by statute, or anyone with
+    consumer-only docket fingerprints). `business` + `unknown` are kept —
+    the latter because the classifier is conservative and some unknowns
+    are real businesses with weird names. Used for the nationwide Ch 7
+    backfill where ~99% of results are consumer noise.
+
+    `progress_every`: log a summary line every N results processed, so
+    long-running ingests (multi-hour Ch 7 sweeps) emit signs of life
+    instead of going dark.
     """
-    inserted = skipped = errors = 0
+    inserted = skipped = errors = skipped_individual = 0
+    processed = 0
     max_filed_at: Optional[date] = None
 
     court_label = court if court is not None else "<nationwide>"
@@ -121,6 +135,45 @@ async def ingest_filter(
         # source has been polled up to that date.
         if max_filed_at is None or event.filed_at > max_filed_at:
             max_filed_at = event.filed_at
+
+        processed += 1
+        if processed % progress_every == 0:
+            logger.info(
+                "  progress: processed=%d inserted=%d skipped-dup=%d "
+                "skipped-individual=%d errors=%d max_seen=%s",
+                processed, inserted, skipped, skipped_individual, errors,
+                max_filed_at.isoformat() if max_filed_at else "-",
+            )
+
+        # Pre-insert classification filter. Cheap (already computed in
+        # normalization) and avoids burning DB writes on individual cases
+        # that downstream consumers would filter out anyway.
+        #
+        # Two filter rules in priority order:
+        #   1. classification == 'individual' (Chapter 13 or a docket
+        #      fingerprint like "Certificate of Credit Counseling")
+        #   2. classification == 'unknown' AND no corporate suffix detected
+        #      on the primary debtor's name. Empirically this is the
+        #      dominant Ch 7 individual shape — search-API results don't
+        #      carry recap_documents, so the docket fingerprint never
+        #      fires, and people-names fall through to ('unknown',
+        #      entity_type='unknown'). Rule 2 catches them via the name
+        #      pattern alone.
+        #
+        # We *don't* relabel these events as 'individual' — the stored
+        # classification stays 'unknown', honest about uncertainty.
+        # The filter is an ingest-time policy, not a classifier change.
+        if skip_individual:
+            is_individual = event.debtor_classification == "individual"
+            primary = debtors[0] if debtors else None
+            is_unknown_no_suffix = (
+                event.debtor_classification == "unknown"
+                and primary is not None
+                and primary.entity_type == "unknown"
+            )
+            if is_individual or is_unknown_no_suffix:
+                skipped_individual += 1
+                continue
 
         if dry_run:
             primary_name = debtors[0].name if debtors else "(no debtor)"
@@ -161,11 +214,11 @@ async def ingest_filter(
             logger.exception("DB error on docket_id=%s", event.source_record_id)
             errors += 1
 
-    return inserted, skipped, errors, max_filed_at
+    return inserted, skipped, errors, skipped_individual, max_filed_at
 
 
 async def run(args: argparse.Namespace) -> None:
-    totals = {"inserted": 0, "skipped": 0, "errors": 0}
+    totals = {"inserted": 0, "skipped": 0, "errors": 0, "skipped_individual": 0}
     run_max_filed_at: Optional[date] = None
 
     # If no --court flag was passed, run one nationwide query per chapter.
@@ -213,7 +266,7 @@ async def run(args: argparse.Namespace) -> None:
             with Session(engine) as session:
                 for court in courts:
                     for chapter in args.chapter:
-                        ins, sk, er, max_seen = await ingest_filter(
+                        ins, sk, er, sk_ind, max_seen = await ingest_filter(
                             client,
                             session,
                             court=court,
@@ -222,10 +275,12 @@ async def run(args: argparse.Namespace) -> None:
                             filed_before=args.filed_before,
                             max_results=args.max_per_combo,
                             dry_run=args.dry_run,
+                            skip_individual=args.skip_individual,
                         )
                         totals["inserted"] += ins
                         totals["skipped"] += sk
                         totals["errors"] += er
+                        totals["skipped_individual"] += sk_ind
                         if max_seen is not None and (
                             run_max_filed_at is None or max_seen > run_max_filed_at
                         ):
@@ -259,9 +314,10 @@ async def run(args: argparse.Namespace) -> None:
                     )
 
     logger.info(
-        "Done. inserted=%d skipped=%d errors=%d",
+        "Done. inserted=%d skipped-dup=%d skipped-individual=%d errors=%d",
         totals["inserted"],
         totals["skipped"],
+        totals["skipped_individual"],
         totals["errors"],
     )
 
@@ -308,6 +364,17 @@ def main() -> None:
             "Resume from the persisted watermark for source='courtlistener'. "
             "Nationwide-only (incompatible with --court). Currently opt-in; "
             "should be default in production."
+        ),
+    )
+    parser.add_argument(
+        "--skip-individual",
+        action="store_true",
+        help=(
+            "Don't insert events the normalizer classifies as 'individual' "
+            "(Chapter 13 by statute, plus anything matching consumer-only "
+            "docket fingerprints). Keeps `business` and `unknown`. "
+            "Designed for the nationwide Chapter 7 backfill, where ~99%% "
+            "of results are consumer cases the dataset doesn't want."
         ),
     )
     parser.add_argument(

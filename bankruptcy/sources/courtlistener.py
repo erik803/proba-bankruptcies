@@ -9,21 +9,28 @@ We retry on 429 / 5xx and on transient network errors. We do NOT retry on
 """
 
 import asyncio
+import logging
+import os
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 
 import httpx
 from tenacity import (
-    retry,
+    AsyncRetrying,
     retry_if_exception,
     stop_after_attempt,
-    wait_exponential,
 )
+
+logger = logging.getLogger(__name__)
 
 # CourtListener's documented authenticated quota is 5 req/min, 50/hour, 125/day.
 # Sleep this long between pages of one search so we stay under the per-minute
 # ceiling without burning retries. See DECISIONS §1.6 for the math.
-INTER_PAGE_SLEEP_S = 13.0
+#
+# Overridable via env var `CL_INTER_PAGE_SLEEP_S` so long-running backfills
+# (nationwide Ch 7 = ~700 pages) can dial up the pacing without code changes
+# if the hourly limit starts biting.
+INTER_PAGE_SLEEP_S = float(os.environ.get("CL_INTER_PAGE_SLEEP_S", "13.0"))
 
 
 def is_retryable(exc: BaseException) -> bool:
@@ -33,6 +40,44 @@ def is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+
+
+def _exc_label(exc: BaseException) -> str:
+    """Short tag for the retry log line."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
+def _backoff_wait_seconds(exc: BaseException, attempt: int) -> float:
+    """Compute how long to wait before the next retry.
+
+    Three rules in priority order:
+      1. If the server sent `Retry-After`, honor it (RFC-compliant).
+      2. For 429s, use a longer initial backoff (60s) so the per-minute
+         window fully clears. Capped at 300s — past that we're probably
+         hitting an hourly limit that needs the whole window to roll.
+      3. For transient 5xx/network errors, a shorter exponential is fine.
+    """
+    # 1. Server-directed wait
+    if isinstance(exc, httpx.HTTPStatusError):
+        retry_after = exc.response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass  # fall through to heuristics
+
+    # 2. 429: 60s, 120s, 240s, 300, 300, 300, 300, 300, 300, 300  (cumulative ~33min)
+    is_429 = (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code == 429
+    )
+    if is_429:
+        return min(60 * (2 ** (attempt - 1)), 300)
+
+    # 3. Other transient errors: 5s, 10s, 20s, ...
+    return min(5 * (2 ** (attempt - 1)), 60)
 
 
 class CourtListenerClient:
@@ -52,20 +97,38 @@ class CourtListenerClient:
         if self._owns_http:
             await self._http.aclose()
 
-    @retry(
-        retry=retry_if_exception(is_retryable),
-        # min=20s so a single 429 wait clears the per-minute window;
-        # max=120s as ceiling; up to 8 attempts so total budget covers
-        # the full 60s rate-limit window plus jitter.
-        wait=wait_exponential(multiplier=2, min=20, max=120),
-        stop=stop_after_attempt(8),
-        reraise=True,
-    )
     async def _request(self, url: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """GET with retry. Uses a hand-rolled wait function so we can honor
+        the server's `Retry-After` header (which exponential alone can't see)
+        and apply 429-specific backoff that starts at 60s.
+
+        10 attempts total. With a worst-case 60+120+240+300+...+300 wait
+        chain, that's ~33 minutes max before we give up — enough to ride
+        out the documented 50/hour cap if it kicks in mid-run.
+        """
         headers = {"Authorization": f"Token {self._token}"}
-        response = await self._http.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        max_attempts = 10
+        async for attempt_ctx in AsyncRetrying(
+            retry=retry_if_exception(is_retryable),
+            stop=stop_after_attempt(max_attempts),
+            reraise=True,
+            wait=lambda rs: _backoff_wait_seconds(
+                rs.outcome.exception(), rs.attempt_number
+            ),
+            before_sleep=lambda rs: logger.warning(
+                "CL %s on attempt %d/%d; waiting %.0fs before retry",
+                _exc_label(rs.outcome.exception()),
+                rs.attempt_number,
+                max_attempts,
+                _backoff_wait_seconds(rs.outcome.exception(), rs.attempt_number),
+            ),
+        ):
+            with attempt_ctx:
+                response = await self._http.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                return response.json()
+        # Unreachable — AsyncRetrying either returns or raises
+        raise RuntimeError("retry loop fell through without returning")
 
     async def search_recap(
         self,

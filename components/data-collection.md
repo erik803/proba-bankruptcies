@@ -24,8 +24,13 @@ How filings get from external sources into our database. Two source pipelines (C
 
 ## Ingestion CLIs
 - **State:** working
-- **What it does:** The actual entry points for fetching data. Run on a schedule (or manually) and they pull new filings from CourtListener and EDGAR, normalize them, classify them, and write them to the database. Idempotent — running the same window twice doesn't duplicate anything. The `--use-watermark` flag (opt-in for now) resumes each source from where it last left off using the `ingest_watermark` table; manual `--filed-after` / `--start` flags still work for backfills.
+- **What it does:** The actual entry points for fetching data. Run on a schedule (or manually) and they pull new filings from CourtListener and EDGAR, normalize them, classify them, and write them to the database. Idempotent — running the same window twice doesn't duplicate anything. The `--use-watermark` flag (opt-in for now) resumes each source from where it last left off using the `ingest_watermark` table; manual `--filed-after` / `--start` flags still work for backfills. The `--skip-individual` flag drops events that are obviously consumer (classification `individual`, or classification `unknown` with no corporate name suffix) — used for the nationwide Chapter 7 backfill so we capture business cases without inserting the ~99% consumer noise.
 - **Where:** `bankruptcy/ingest.py`, `bankruptcy/ingest_edgar.py`
+
+## CL rate-limit handling
+- **State:** working
+- **What it does:** CourtListener's documented quota is 5 req/min and 50 req/hour. The client paces page-fetches via `INTER_PAGE_SLEEP_S` (default 13s, overridable via the `CL_INTER_PAGE_SLEEP_S` env var — used at 75s for the long Ch 7 nationwide backfill to stay under the hourly cap). On a 429 response, the retry block honors the server's `Retry-After` header verbatim; without that header, it backs off starting at 60s (the per-minute window length) up to 300s, for 10 attempts. Long-running ingests log every retry decision and a progress line every 200 events processed, so they have signs of life during multi-hour runs.
+- **Where:** `bankruptcy/sources/courtlistener.py`
 
 ## Data-quality guards at the normalizer
 - **State:** working
