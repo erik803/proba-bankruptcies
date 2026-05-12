@@ -15,8 +15,24 @@ from bankruptcy.models import BankruptcyEvent, Debtor
 #   "QVC GCH Company, LLC <b><font color=\"red\">Jointly Administered</font></b>"
 # Strip the markup before any name parsing.
 HTML_TAG_RE = re.compile(r"<[^>]+>")
-JOINT_ADMIN_RE = re.compile(r"jointly\s+administered", re.I)
+
+# Match the "jointly administered" annotation including an optional leading
+# `(` and any surrounding whitespace, so the splitter doesn't leave behind
+# an orphan paren like "Fitzgibbon Health Services (" when the source text is
+# "Fitzgibbon Health Services (JOINTLY ADMINISTERED - ...)".
+# `JOINT_ADMIN_DETECT_RE` is the looser pattern used for boolean detection
+# (it doesn't care about leading paren); `JOINT_ADMIN_SPLIT_RE` is the
+# pattern used to slice the canonical name off the front of the string.
+JOINT_ADMIN_DETECT_RE = re.compile(r"jointly\s+administered", re.I)
+JOINT_ADMIN_SPLIT_RE = re.compile(r"\s*\(?\s*jointly\s+administered", re.I)
 LEAD_CASE_RE = re.compile(r"jointly\s+administered\s+(?:under\s+)?([\d:\-a-z]+)", re.I)
+
+# Match a trailing *unclosed* parenthetical — i.e. an open paren whose
+# closing paren is missing entirely. CourtListener occasionally delivers
+# names where an annotation was truncated upstream, leaving "ACME, INC (".
+# Closed annotations like "ACME Inc. (NJ)" are *not* matched and are kept
+# intact (they carry useful information like geographic distinguisher).
+TRAILING_UNCLOSED_PAREN_RE = re.compile(r"\s*\([^)]*$")
 
 
 def clean_case_name(raw: str) -> tuple[str, bool, Optional[str]]:
@@ -29,13 +45,16 @@ def clean_case_name(raw: str) -> tuple[str, bool, Optional[str]]:
     text = HTML_TAG_RE.sub(" ", raw).strip()
     text = re.sub(r"\s+", " ", text)
 
-    is_joint = bool(JOINT_ADMIN_RE.search(text))
+    is_joint = bool(JOINT_ADMIN_DETECT_RE.search(text))
     lead_match = LEAD_CASE_RE.search(text)
     lead = lead_match.group(1) if lead_match else None
 
-    # Drop the trailing "Jointly Administered..." phrase for the canonical name.
-    cleaned = JOINT_ADMIN_RE.split(text, maxsplit=1)[0]
+    # Drop the "...Jointly Administered..." trailing annotation, including
+    # any leading paren that introduces it. Then mop up trailing punctuation
+    # and any unclosed parenthetical CourtListener may have delivered.
+    cleaned = JOINT_ADMIN_SPLIT_RE.split(text, maxsplit=1)[0]
     cleaned = cleaned.rstrip(",. ").strip()
+    cleaned = TRAILING_UNCLOSED_PAREN_RE.sub("", cleaned).rstrip(",. ").strip()
     return cleaned, is_joint, lead
 
 # --- Entity-name parsing ----------------------------------------------------
@@ -53,10 +72,17 @@ ENTITY_SUFFIX_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:CO\.?|COMPANY)\s*$", re.I), "co"),
 ]
 
+# Match a trailing parenthetical that masks an entity suffix from end-of-string
+# matching. CourtListener sometimes truncates long case names mid-parenthetical
+# (e.g. "THE TRUETT MEMORIAL SOUTHERN BAPTIST CHURCH, INC (") and otherwise
+# attaches annotations like "(DEBTOR)" or "(a Delaware Corp)". Stripping these
+# before suffix detection lets the underlying INC/LLC/etc. still be picked up.
+TRAILING_PAREN_RE = re.compile(r"\s*\([^)]*\)?\s*$")
+
 
 def detect_entity_type(name: str) -> str:
     """Map a debtor name's trailing suffix to one of our entity_type values."""
-    cleaned = name.strip().rstrip(",.;:")
+    cleaned = TRAILING_PAREN_RE.sub("", name.strip()).rstrip(",.;:")
     for pattern, type_ in ENTITY_SUFFIX_PATTERNS:
         if pattern.search(cleaned):
             return type_
@@ -69,7 +95,7 @@ def normalize_name(name: str) -> str:
     Used as the `debtor.normalized_name` value, which is the column the API
     hits with `ILIKE '%query%'` (backed by a pg_trgm GIN index).
     """
-    s = name.strip()
+    s = TRAILING_PAREN_RE.sub("", name.strip())
     for pattern, _ in ENTITY_SUFFIX_PATTERNS:
         s = pattern.sub("", s).strip()
     s = s.rstrip(",.;:").strip()

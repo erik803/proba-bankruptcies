@@ -46,3 +46,9 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Personal study notes — not for the public repo
+DECISIONS.md
+
+# Claude Code project-level config / custom subagents
+.claude/

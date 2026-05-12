@@ -5,34 +5,393 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bankruptcy Detection Pilot</title>
 <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.4; }
-    h1 { font-size: 1.5em; margin-bottom: 0.2em; }
-    .subtitle { color: #666; margin-bottom: 2em; font-size: 0.95em; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1em; margin-bottom: 2em; }
-    .card { border: 1px solid #ddd; border-radius: 6px; padding: 1em; background: #fff; }
-    .card .value { font-size: 1.8em; font-weight: 600; color: #111; }
-    .card .label { color: #666; font-size: 0.85em; margin-top: 0.2em; }
-    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-bottom: 2em; }
-    .chart-box { border: 1px solid #ddd; border-radius: 6px; padding: 1em; background: #fff; }
-    .chart-box h3 { margin: 0 0 0.6em 0; font-size: 0.95em; color: #444; }
-    .chart-canvas-wrap { position: relative; height: 240px; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
-    th, td { text-align: left; padding: 0.5em 0.6em; border-bottom: 1px solid #eee; vertical-align: top; }
-    th { background: #fafafa; font-weight: 600; color: #555; font-size: 0.85em; }
-    tr:hover td { background: #fafbfc; }
-    .filters { margin-bottom: 1em; display: flex; gap: 0.5em; flex-wrap: wrap; align-items: center; }
-    .filters input, .filters select { padding: 0.45em 0.6em; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9em; }
-    .filters button { padding: 0.45em 1em; border: 1px solid #0066cc; background: #0066cc; color: white; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
-    .filters button:hover { background: #0052a3; }
-    a { color: #0066cc; text-decoration: none; }
+    :root {
+        --bg: #F5F4F0;
+        --surface: #FFFFFF;
+        --border: #E8E6E1;
+        --text: #1A1A1A;
+        --text-muted: #5A5A5A;
+        --text-faint: #8A8782;
+        --accent: #FF6028;
+        --accent-soft: #FFE4D8;
+        --blue: #2240FF;
+        --blue-hover: #1A35F0;
+        --green: #37A26B;
+        --yellow: #FFC93C;
+        --magenta: #9B4DFF;
+        --sky: #3DBEF2;
+    }
+    * { box-sizing: border-box; }
+    html {
+        /* Reserve scrollbar gutter so the viewport width is constant whether
+           or not the page overflows. Prevents the horizontal "spaz" when the
+           events table shrinks (group-filtered view) and the vertical
+           scrollbar disappears, then reappears once rows reload. */
+        scrollbar-gutter: stable;
+    }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+        max-width: 1100px;
+        margin: 2.5em auto;
+        padding: 0 1.25em;
+        color: var(--text);
+        line-height: 1.45;
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+    }
+    /* Soft "in-flight" state on the events table during fetches. Keeps the
+       existing rows visible (so the page height doesn't collapse to a single
+       "Loading..." row) but dims them and blocks pointer events. */
+    .table-wrap.is-loading tbody { opacity: 0.45; pointer-events: none; transition: opacity 120ms ease; }
+    .table-wrap.is-loading { position: relative; }
+    .table-wrap.is-loading::after {
+        content: "Loading\2026";
+        position: absolute;
+        top: 0.6em;
+        right: 0.8em;
+        font-size: 0.8em;
+        color: var(--text-muted);
+        background: var(--surface);
+        padding: 0.15em 0.5em;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+    }
+    h1 {
+        font-size: 2em;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.25em 0;
+        color: var(--text);
+    }
+    h3 {
+        font-size: 1.05em;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: var(--text);
+        margin: 0 0 0.75em 0;
+    }
+    .subtitle {
+        color: var(--text-muted);
+        margin: 0 0 2.5em 0;
+        font-size: 0.98em;
+    }
+    .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 0.85em;
+        margin-bottom: 2em;
+    }
+    .card {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.1em 1.2em;
+        background: var(--surface);
+    }
+    .card .value {
+        font-size: 2em;
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+    }
+    .card .label {
+        color: var(--text-muted);
+        font-size: 0.72em;
+        margin-top: 0.5em;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 500;
+    }
+    .charts {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1em;
+        margin-bottom: 2em;
+    }
+    .chart-box {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.25em 1.4em 1.4em;
+        background: var(--surface);
+    }
+    .chart-box h3 {
+        margin: 0 0 0.15em 0;
+    }
+    .chart-caption {
+        display: block;
+        color: var(--text-muted);
+        font-size: 0.85em;
+        margin-bottom: 1em;
+    }
+    .chart-canvas-wrap { position: relative; height: 360px; }
+    .chart-canvas-wrap.tall { height: 480px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+    th, td {
+        text-align: left;
+        padding: 0.65em 0.7em;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+    }
+    /* Keep short, atomic values on a single line. Without this the Debtor
+       column hogs space and "Ch 11" / "Ch 7" / case numbers wrap awkwardly. */
+    table td:nth-child(1),  /* Filed */
+    table td:nth-child(3),  /* Case # */
+    table td:nth-child(6),  /* Type — "Ch 11" must stay one line */
+    table th:nth-child(6) {
+        white-space: nowrap;
+    }
+    th {
+        background: transparent;
+        font-weight: 600;
+        color: var(--text-muted);
+        font-size: 0.72em;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        border-bottom: 1px solid var(--border);
+    }
+    tr:hover td { background: #FAF9F6; }
+    .table-wrap {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 0.25em 0.6em;
+        margin-top: 0.5em;
+    }
+    .filters {
+        margin-bottom: 0.6em;
+        display: flex;
+        gap: 0.5em;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .filters #filterCompany {
+        flex: 1 1 320px;
+        min-width: 240px;
+    }
+    .filters .filters-right {
+        display: flex;
+        gap: 0.5em;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .filters input, .filters select {
+        padding: 0.5em 0.7em;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        font-size: 0.9em;
+        background: var(--surface);
+        color: var(--text);
+        font-family: inherit;
+    }
+    .filters input:focus, .filters select:focus {
+        outline: none;
+        border-color: var(--blue);
+    }
+    .filters button {
+        padding: 0.5em 1.1em;
+        border: 1px solid var(--blue);
+        background: var(--blue);
+        color: white;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9em;
+        font-weight: 500;
+        font-family: inherit;
+    }
+    .filters button:hover { background: var(--blue-hover); border-color: var(--blue-hover); }
+    @media (max-width: 700px) {
+        .filters #filterCompany { flex-basis: 100%; }
+        .filters .filters-right { width: 100%; }
+    }
+    .example-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4em;
+        align-items: center;
+        margin-bottom: 1em;
+        font-size: 0.82em;
+        color: var(--text-muted);
+    }
+    .example-chips .chips-label {
+        font-size: 0.78em;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-faint);
+        margin-right: 0.2em;
+    }
+    .example-chips .chip {
+        display: inline-block;
+        padding: 0.25em 0.7em;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+        color: var(--text-muted);
+        font-size: 0.85em;
+        cursor: pointer;
+        font-family: inherit;
+    }
+    .example-chips .chip:hover {
+        border-color: var(--blue);
+        color: var(--blue);
+    }
+    .groups-section {
+        margin-bottom: 2em;
+    }
+    .groups-section h3 { margin-bottom: 0.15em; }
+    .groups-section .section-caption {
+        display: block;
+        color: var(--text-muted);
+        font-size: 0.88em;
+        margin-bottom: 1em;
+    }
+    .group-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.85em;
+    }
+    .group-card {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1em 1.1em;
+        background: var(--surface);
+        cursor: pointer;
+        transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+        text-align: left;
+        font-family: inherit;
+    }
+    .group-card:hover {
+        border-color: var(--blue);
+        box-shadow: 0 2px 10px rgba(34, 64, 255, 0.08);
+        transform: translateY(-1px);
+    }
+    /* Visible state when this card's group is the one currently filtering
+       the events table below. Matches the brand blue + a subtle background
+       tint so the user can see at a glance which card they're "on". */
+    .group-card.is-active {
+        border-color: var(--blue);
+        background: #F2F4FF;
+        box-shadow: 0 0 0 2px rgba(34, 64, 255, 0.18);
+    }
+    .group-card.is-active::after {
+        content: "Selected";
+        display: inline-block;
+        margin-top: 0.55em;
+        margin-left: 0.4em;
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: var(--blue);
+        color: white;
+        font-size: 0.7em;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+    }
+    .group-card .value {
+        font-size: 2em;
+        font-weight: 700;
+        color: var(--text);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+    }
+    .group-card .sample {
+        margin-top: 0.4em;
+        font-size: 0.92em;
+        font-weight: 500;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+    }
+    .group-card .meta {
+        margin-top: 0.5em;
+        font-size: 0.76em;
+        color: var(--text-faint);
+        letter-spacing: 0.01em;
+    }
+    .group-card .edgar-badge {
+        display: inline-block;
+        margin-top: 0.55em;
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: #E6EAFF;
+        color: var(--blue);
+        font-size: 0.7em;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    .group-filter-banner {
+        display: none;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.75em;
+        padding: 0.55em 0.85em;
+        background: #E6EAFF;
+        border: 1px solid #CCD4FF;
+        border-radius: 6px;
+        color: #1A2BB8;
+        font-size: 0.88em;
+    }
+    .group-filter-banner.active { display: flex; }
+    .group-filter-banner .clear-btn {
+        margin-left: auto;
+        background: transparent;
+        border: none;
+        color: #1A2BB8;
+        font-size: 1.1em;
+        cursor: pointer;
+        padding: 0 0.3em;
+        line-height: 1;
+        font-family: inherit;
+    }
+    .group-filter-banner .clear-btn:hover { color: var(--blue-hover); }
+    .group-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        background: var(--accent-soft);
+        color: #B83A0E;
+        font-size: 0.75em;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+    }
+    .edgar-dot {
+        display: inline-block;
+        margin-left: 0.35em;
+        padding: 2px 7px;
+        border-radius: 10px;
+        background: #E6EAFF;
+        color: var(--blue);
+        font-size: 0.68em;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        vertical-align: middle;
+    }
+    .group-cell-empty { color: var(--text-faint); }
+    a { color: var(--blue); text-decoration: none; font-weight: 500; }
     a:hover { text-decoration: underline; }
-    .conf { font-variant-numeric: tabular-nums; color: #555; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 500; }
-    .pill-business { background: #e6f4ea; color: #1b5e20; }
-    .pill-individual { background: #fef3e6; color: #8b5a00; }
-    .pill-unknown { background: #f0f0f0; color: #666; }
-    .empty { color: #999; font-style: italic; padding: 2em; text-align: center; }
-    @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+    .conf { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+    .pill {
+        display: inline-block;
+        padding: 2px 9px;
+        border-radius: 10px;
+        font-size: 0.75em;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+    .pill-business { background: var(--accent-soft); color: #B83A0E; }
+    .pill-individual { background: #E6EAFF; color: #1A2BB8; }
+    .pill-unknown { background: #ECEAE4; color: var(--text-muted); }
+    .empty, .loading {
+        color: var(--text-faint);
+        font-style: italic;
+        padding: 2em;
+        text-align: center;
+    }
+    #resultCount { color: var(--text-muted); font-size: 0.88em; }
 </style>
 </head>
 <body>
@@ -50,101 +409,310 @@
 
 <div class="charts">
     <div class="chart-box">
-        <h3>Filings per day (last 30 days)</h3>
+        <h3>Filings per day, last 30 days</h3>
+        <span class="chart-caption">New bankruptcy events ingested each day.</span>
         <div class="chart-canvas-wrap"><canvas id="byDay"></canvas></div>
     </div>
     <div class="chart-box">
-        <h3>By court</h3>
-        <div class="chart-canvas-wrap"><canvas id="byCourt"></canvas></div>
+        <h3>Filings by court</h3>
+        <span class="chart-caption">Number of bankruptcy events ingested per court &mdash; top 15.</span>
+        <div class="chart-canvas-wrap tall"><canvas id="byCourt"></canvas></div>
     </div>
 </div>
 
+{% if top_groups %}
+<section class="groups-section">
+    <h3>Top corporate groups</h3>
+    <span class="section-caption">The largest related-filing clusters detected by our pipeline &mdash; clustering joint petitions and consecutive-case filings.</span>
+    <div class="group-cards">
+        {% for g in top_groups %}
+        <button type="button" class="group-card" data-group-id="{{ g.group_id }}" data-group-size="{{ g.size }}" data-group-name="{{ g.sample_name }}">
+            <div class="value">{{ g.size }}</div>
+            <div class="sample">{{ g.sample_name }}</div>
+            <div class="meta">
+                {% if g.first_filed == g.last_filed %}{{ g.first_filed }}{% else %}{{ g.first_filed }} &ndash; {{ g.last_filed }}{% endif %}
+                &middot; {{ g.courts | join(', ') if g.courts else '(no court)' }}
+            </div>
+            {% if g.cross_source %}<span class="edgar-badge">EDGAR confirmed</span>{% endif %}
+        </button>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
 <h3>Recent events</h3>
 <div class="filters">
-    <input id="filterCompany" placeholder="Company name (e.g. impac)">
-    <select id="filterClassification">
-        <option value="">all classifications</option>
-        <option value="business">business</option>
-        <option value="individual">individual</option>
-        <option value="unknown">unknown</option>
-    </select>
-    <select id="filterChapter">
-        <option value="">all chapters</option>
-        <option value="chapter_7">chapter 7</option>
-        <option value="chapter_11">chapter 11</option>
-    </select>
-    <button onclick="loadEvents()">Filter</button>
-    <span id="resultCount" style="color: #666; font-size: 0.9em;"></span>
+    <input id="filterCompany" placeholder="Search by company name &mdash; try Spanish Broadcasting, QVC, Impac, Finch Therapeutics, YesCare">
+    <div class="filters-right">
+        <select id="filterCourt">
+            <option value="">all courts</option>
+            {% for c in all_courts %}
+            <option value="{{ c.id }}">{{ c.label }} ({{ c.count }})</option>
+            {% endfor %}
+        </select>
+        <select id="filterClassification">
+            <option value="">all classifications</option>
+            <option value="business">business</option>
+            <option value="individual">individual</option>
+            <option value="unknown">unknown</option>
+        </select>
+        <select id="filterChapter">
+            <option value="">all chapters</option>
+            <option value="chapter_7">chapter 7</option>
+            <option value="chapter_11">chapter 11</option>
+        </select>
+        <button onclick="clearGroupFilter()">Filter</button>
+        <span id="resultCount"></span>
+    </div>
 </div>
+<div class="example-chips">
+    <span class="chips-label">Try:</span>
+    <button type="button" class="chip" data-example="Spanish Broadcasting">Spanish Broadcasting</button>
+    <button type="button" class="chip" data-example="QVC">QVC</button>
+    <button type="button" class="chip" data-example="Impac">Impac</button>
+    <button type="button" class="chip" data-example="Finch Therapeutics">Finch Therapeutics</button>
+    <button type="button" class="chip" data-example="YesCare">YesCare</button>
+</div>
+<div id="groupFilterBanner" class="group-filter-banner">
+    <span id="groupFilterText"></span>
+    <button type="button" class="clear-btn" onclick="clearGroupFilter()" aria-label="Clear group filter">&times;</button>
+</div>
+<div class="table-wrap">
 <table>
     <thead><tr>
-        <th>Filed</th><th>Court</th><th>Case #</th><th>Debtor</th><th>Type</th><th>Class</th><th>Conf</th><th>Source</th>
+        <th>Filed</th><th>Court</th><th>Case #</th><th>Debtor</th><th title="Total entities in the corporate group this row is part of">Group size</th><th>Type</th><th>Class</th><th>Conf</th><th>Source</th>
     </tr></thead>
-    <tbody id="eventsBody"></tbody>
+    <tbody id="eventsBody">
+        <tr><td colspan="9" class="loading">Loading&hellip;</td></tr>
+    </tbody>
 </table>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
 const byDay = {{ by_day | tojson }};
 const byCourt = {{ by_court | tojson }};
 
+// Shared Chart.js defaults for the Veridion look.
+Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif';
+Chart.defaults.color = '#5A5A5A';
+Chart.defaults.borderColor = '#E8E6E1';
+
 if (Object.keys(byDay).length > 0) {
     new Chart(document.getElementById('byDay'), {
         type: 'bar',
         data: {
             labels: Object.keys(byDay),
-            datasets: [{ label: 'filings', data: Object.values(byDay), backgroundColor: '#0066cc' }],
+            datasets: [{
+                label: 'filings',
+                data: Object.values(byDay),
+                backgroundColor: '#2240FF',
+                borderRadius: 3,
+                maxBarThickness: 26,
+            }],
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { backgroundColor: '#1A1A1A', padding: 10, cornerRadius: 6 },
+            },
+            scales: {
+                x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkipPadding: 12 } },
+                y: { beginAtZero: true, grid: { color: '#EFEDE7' }, ticks: { precision: 0 } },
+            },
+        }
     });
 }
-if (Object.keys(byCourt).length > 0) {
+// byCourt is a list of [label, count] pairs from the API — preserves the
+// descending-count order (Jinja2's `tojson` would re-sort a dict).
+if (byCourt.length > 0) {
     new Chart(document.getElementById('byCourt'), {
         type: 'bar',
         data: {
-            labels: Object.keys(byCourt),
-            datasets: [{ label: 'filings', data: Object.values(byCourt), backgroundColor: '#0066cc' }],
+            labels: byCourt.map(p => p[0]),
+            datasets: [{
+                label: 'filings',
+                data: byCourt.map(p => p[1]),
+                backgroundColor: '#FF6028',
+                borderRadius: 3,
+                maxBarThickness: 22,
+            }],
         },
-        options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } } }
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: 'y',
+            layout: { padding: { left: 4, right: 12 } },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#1A1A1A',
+                    padding: 10,
+                    cornerRadius: 6,
+                    callbacks: {
+                        title: (items) => items[0].label,
+                        label: (item) => `${item.parsed.x} filing${item.parsed.x === 1 ? '' : 's'}`,
+                    },
+                },
+            },
+            scales: {
+                x: { beginAtZero: true, grid: { color: '#EFEDE7' }, ticks: { precision: 0 } },
+                y: {
+                    grid: { display: false },
+                    ticks: {
+                        autoSkip: false,
+                        font: { size: 12 },
+                        // Wrap long court names onto two lines so they don't overflow.
+                        callback: function(value) {
+                            const label = this.getLabelForValue(value);
+                            if (label.length <= 42) return label;
+                            const mid = label.lastIndexOf(' ', 42);
+                            const cut = mid > 20 ? mid : 42;
+                            return [label.slice(0, cut), label.slice(cut).trim()];
+                        },
+                    },
+                },
+            },
+        }
     });
 }
 
-async function loadEvents() {
+// Active group filter state — set by clicking a group card, cleared by the
+// banner's × button or by hitting the Filter button (which resets to the
+// form-level filters).
+let activeGroupFilter = null; // { group_id, size, sample_name } | null
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+function setGroupFilter(group) {
+    activeGroupFilter = group;
+    const banner = document.getElementById('groupFilterBanner');
+    const text = document.getElementById('groupFilterText');
+    if (group) {
+        text.textContent = `Filtered to group: ${group.size}-entity ${group.sample_name}`;
+        banner.classList.add('active');
+    } else {
+        banner.classList.remove('active');
+        text.textContent = '';
+    }
+    // Mirror the active state onto whichever top-groups card matches, so the
+    // user sees which card is "on". Clear all when no filter is active.
+    for (const card of document.querySelectorAll('.group-card')) {
+        const matches = group && card.dataset.groupId === group.group_id;
+        card.classList.toggle('is-active', !!matches);
+    }
+}
+
+function clearGroupFilter() {
+    setGroupFilter(null);
+    loadEvents();
+}
+
+async function loadEvents(opts = {}) {
+    // The Filter button calls loadEvents() with no args — that should reset
+    // any active group filter so the form values take over.
+    if (opts.preserveGroup !== true) {
+        // no-op: keep activeGroupFilter as-is when explicitly preserved.
+    }
     const company = document.getElementById('filterCompany').value;
     const cls = document.getElementById('filterClassification').value;
     const chap = document.getElementById('filterChapter').value;
+    const courtId = document.getElementById('filterCourt').value;
     const url = new URL('/bankruptcies', window.location.origin);
     if (company) url.searchParams.set('company', company);
     if (cls) url.searchParams.set('classification', cls);
     if (chap) url.searchParams.set('proceeding_type', chap);
+    if (courtId) url.searchParams.set('court', courtId);
+    if (activeGroupFilter) url.searchParams.set('group_id', activeGroupFilter.group_id);
     url.searchParams.set('limit', '100');
+
+    const body = document.getElementById('eventsBody');
+    const wrap = document.querySelector('.table-wrap');
+    // First load only: nothing to dim, so show the inline "Loading..." row.
+    // Subsequent loads: keep the previous rows visible and just dim them so
+    // the page height doesn't collapse and re-grow (which causes a scrollbar
+    // / horizontal layout shift).
+    if (body.children.length === 0) {
+        body.innerHTML = '<tr><td colspan="9" class="loading">Loading&hellip;</td></tr>';
+    } else {
+        wrap.classList.add('is-loading');
+    }
 
     const resp = await fetch(url);
     const data = await resp.json();
-    const body = document.getElementById('eventsBody');
-    body.innerHTML = '';
     document.getElementById('resultCount').textContent =
         `${data.items.length} of ${data.total}`;
 
+    body.innerHTML = '';
+    wrap.classList.remove('is-loading');
+
     if (data.items.length === 0) {
-        body.innerHTML = '<tr><td colspan="8" class="empty">No matches.</td></tr>';
+        body.innerHTML = '<tr><td colspan="9" class="empty">No matches.</td></tr>';
         return;
     }
     for (const e of data.items) {
         const debtor = e.debtors[0] || {};
+        const court = e.jurisdiction_court_name || e.jurisdiction_court_id || '—';
+        // Group column: show the total cluster size as a single number
+        // (e.g. "52" for an SBS subsidiary, meaning this row is one of 52
+        // related filings). Hover tooltip explains. EDGAR pill appears
+        // beside it when the group has a cross-source SEC confirmation.
+        let groupCell;
+        if (e.group_size && e.group_size > 1) {
+            groupCell = `<span class="group-pill" title="Part of a ${e.group_size}-entity corporate filing">${e.group_size}</span>`;
+            if (e.cross_source_confirmed) {
+                groupCell += `<span class="edgar-dot" title="Confirmed by an SEC 8-K filing in EDGAR">EDGAR</span>`;
+            }
+        } else {
+            groupCell = `<span class="group-cell-empty">&mdash;</span>`;
+        }
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td>${e.filed_at}</td>
-            <td>${e.jurisdiction_court_id}</td>
-            <td>${e.case_number || ''}</td>
-            <td>${(debtor.name || '').replace(/</g, '&lt;')}</td>
-            <td>${e.proceeding_type.replace('chapter_', 'Ch ')}</td>
+            <td>${escapeHtml(court)}</td>
+            <td>${escapeHtml(e.case_number || '')}</td>
+            <td>${escapeHtml(debtor.name || '')}</td>
+            <td>${groupCell}</td>
+            <td>${escapeHtml(e.proceeding_type.replace('chapter_', 'Ch '))}</td>
             <td><span class="pill pill-${e.debtor_classification}">${e.debtor_classification}</span></td>
             <td class="conf">${e.classification_confidence.toFixed(2)}</td>
-            <td>${e.source_url ? `<a href="${e.source_url}" target="_blank" rel="noopener">view</a>` : ''}</td>
+            <td>${e.source_url ? `<a href="${escapeHtml(e.source_url)}" target="_blank" rel="noopener">view</a>` : ''}</td>
         `;
         body.appendChild(tr);
     }
+}
+
+// Wire up example chips: clicking one fills the search box and re-runs.
+// Also clears any active group filter — the chip-driven search should
+// behave like a fresh form submit.
+for (const chip of document.querySelectorAll('.example-chips .chip')) {
+    chip.addEventListener('click', () => {
+        document.getElementById('filterCompany').value = chip.dataset.example;
+        setGroupFilter(null);
+        loadEvents();
+    });
+}
+
+// Wire up group cards: clicking one filters the table to that group.
+// Deliberately do NOT scroll the page — the table updates in place (rows
+// dim during fetch, swap on resolve), so leaving the user where they were
+// is the right move. The card's "Selected" state + the banner above the
+// table are sufficient feedback that the filter applied.
+for (const card of document.querySelectorAll('.group-card')) {
+    card.addEventListener('click', () => {
+        setGroupFilter({
+            group_id: card.dataset.groupId,
+            size: parseInt(card.dataset.groupSize, 10),
+            sample_name: card.dataset.groupName,
+        });
+        loadEvents({ preserveGroup: true });
+    });
 }
 
 loadEvents();

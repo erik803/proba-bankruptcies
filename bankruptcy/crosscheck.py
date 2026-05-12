@@ -24,8 +24,13 @@ on cross-checked data is a no-op.
 Matching algorithm:
   - Date proximity: |EDGAR.filed_at - CL.filed_at| <= 14 days. Wider than
     the 4-business-day SEC rule because CL latency from PACER can vary.
-  - Name similarity: Jaccard >= 0.5 on significant tokens (corporate
-    stopwords filtered: 'inc', 'llc', 'group', 'holdings', etc.).
+  - Name similarity: containment >= 1.0 on significant tokens (corporate
+    stopwords like 'inc', 'llc', 'group', 'holdings' filtered out).
+    Containment = |A ∩ B| / min(|A|, |B|); threshold 1.0 means one token
+    set must be a strict subset of the other. Chosen over Jaccard because
+    cross-source name matching is fundamentally asymmetric — EDGAR has
+    the parent name (few tokens) and CL has the subsidiary names (more
+    tokens), and Jaccard penalizes that asymmetry.
 """
 
 import logging
@@ -51,22 +56,37 @@ DATE_WINDOW_DAYS = 14
 # want.
 CONTAINMENT_THRESHOLD = 1.0
 
-# Tokens too common in corporate names to be useful as a match signal.
-# Suffix tokens (inc, llc, ...) are usually already stripped by
-# normalize_name(), but we list them here as belt-and-braces.
+# Tokens too generic to be a match signal. Two groups: legal boilerplate
+# (llc, inc, ...) and category words (properties, media, industries, ...).
+# Category words were added after a false positive at 77-court scale —
+# EDGAR's "OFFICE PROPERTIES INCOME TRUST" matched CL's "W/L Properties
+# L.L.C" purely on the shared token "properties". See DECISIONS §8.6.
 NAME_STOPWORDS = frozenset({
+    # Connectors
     "the", "and", "of", "for",
+    # Legal entity suffixes
     "co", "corp", "corporation", "inc", "incorporated", "ltd", "limited",
     "llc", "lp", "llp", "pllc", "pc",
     "company", "companies",
     "holding", "holdings",
     "group",
     "capital",
+    "trust",
+    # Geography-as-marketing
     "international", "global", "national", "american",
     "us", "usa", "united", "states",
+    # Generic activity / service words
     "services", "service",
     "enterprises", "enterprise",
-    "trust",
+    # Generic category / sector words (added after the OPI/W-L false positive)
+    "properties", "property",
+    "realty", "estate",
+    "media",
+    "industries", "industry",
+    "technologies", "technology", "tech",
+    "solutions", "solution",
+    "partners", "ventures",
+    "energy", "financial", "healthcare", "pharma",
 })
 
 
@@ -100,15 +120,28 @@ def crosscheck(session: Session) -> tuple[int, int]:
         select(BankruptcyEvent).where(BankruptcyEvent.source == "courtlistener")
     ).all()
 
-    primary_debtor_by_event: dict[Any, Debtor] = {}
-    for e in (*edgar_events, *cl_events):
-        d = session.exec(
+    # Fetch all primary debtors in one query, then index by event_id.
+    # Avoids N+1 round-trips when the event set grows (every event has at
+    # most one primary debtor by schema).
+    event_ids = [e.event_id for e in (*edgar_events, *cl_events)]
+    primary_debtor_by_event: dict[Any, Debtor] = {
+        d.event_id: d
+        for d in session.exec(
             select(Debtor)
-            .where(Debtor.event_id == e.event_id)
+            .where(Debtor.event_id.in_(event_ids))
             .where(Debtor.role == "primary")
-        ).first()
-        if d:
-            primary_debtor_by_event[e.event_id] = d
+        ).all()
+    }
+
+    # Precompute CL token sets once. Without this we'd recompute the same
+    # token regex for every (edgar, cl) pair — O(|EDGAR| · |CL|) regex calls.
+    cl_tokens_by_event: dict[Any, frozenset[str]] = {
+        cl_e.event_id: significant_tokens(
+            primary_debtor_by_event[cl_e.event_id].normalized_name
+        )
+        for cl_e in cl_events
+        if cl_e.event_id in primary_debtor_by_event
+    }
 
     matches = 0
     links_made = 0
@@ -130,14 +163,12 @@ def crosscheck(session: Session) -> tuple[int, int]:
         for cl_e in cl_events:
             if abs((cl_e.filed_at - edgar_e.filed_at).days) > DATE_WINDOW_DAYS:
                 continue
-            cl_d = primary_debtor_by_event.get(cl_e.event_id)
-            if not cl_d:
+            cl_tokens = cl_tokens_by_event.get(cl_e.event_id)
+            if not cl_tokens:
                 continue
-            score = containment_similarity(
-                edgar_tokens, significant_tokens(cl_d.normalized_name)
-            )
+            score = containment_similarity(edgar_tokens, cl_tokens)
             if score >= CONTAINMENT_THRESHOLD:
-                candidates.append((score, cl_e, cl_d))
+                candidates.append((score, cl_e, primary_debtor_by_event[cl_e.event_id]))
 
         if not candidates:
             logger.info(

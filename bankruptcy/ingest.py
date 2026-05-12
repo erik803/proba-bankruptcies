@@ -1,7 +1,14 @@
 """Ingestion CLI: pull recent filings from CourtListener and upsert to DB.
 
-Usage:
+Two modes:
+
+    # Per-court (pilot backfill mode): one search per (court, chapter).
     python -m bankruptcy.ingest --court deb --chapter 11 --max-per-combo 50
+
+    # Nationwide (production / steady-state mode): one search per chapter,
+    # no court filter. Scans all 95 courts in a single API call — see
+    # DECISIONS §1.6 for the rate-limit math.
+    python -m bankruptcy.ingest --chapter 11 --filed-after 2026-04-12
 
 Idempotent: re-running on the same window will skip records already in the
 DB (matched by `(source, source_record_id)`).
@@ -10,6 +17,7 @@ DB (matched by `(source, source_record_id)`).
 import argparse
 import asyncio
 import logging
+from typing import Optional
 
 from sqlmodel import Session, select
 
@@ -45,22 +53,37 @@ def insert_if_new(
     return True
 
 
-async def ingest_court_chapter(
+async def ingest_filter(
     client: CourtListenerClient,
     session: Session,
     *,
-    court: str,
+    court: Optional[str],
     chapter: str,
+    filed_after: Optional[str],
+    filed_before: Optional[str],
     max_results: int,
     dry_run: bool,
 ) -> tuple[int, int, int]:
-    """Returns (inserted, skipped, errors) for one (court, chapter) combination."""
+    """Returns (inserted, skipped, errors) for one filter combination.
+
+    `court=None` runs a nationwide search (one API call, scans all 95 courts).
+    Otherwise runs a per-court search.
+    """
     inserted = skipped = errors = 0
 
-    logger.info("Fetching court=%s chapter=%s (max=%d)", court, chapter, max_results)
+    court_label = court if court is not None else "<nationwide>"
+    window = ""
+    if filed_after or filed_before:
+        window = f" window=[{filed_after or '*'}..{filed_before or '*'}]"
+    logger.info(
+        "Fetching court=%s chapter=%s%s (max=%d)",
+        court_label, chapter, window, max_results,
+    )
     async for result in client.search_recap(
         court=court,
         query=f"chapter:{chapter}",
+        filed_after=filed_after,
+        filed_before=filed_before,
         max_results=max_results,
     ):
         try:
@@ -117,15 +140,21 @@ async def ingest_court_chapter(
 async def run(args: argparse.Namespace) -> None:
     totals = {"inserted": 0, "skipped": 0, "errors": 0}
 
+    # If no --court flag was passed, run one nationwide query per chapter.
+    # [None] is the sentinel for "no court filter."
+    courts: list[Optional[str]] = args.court if args.court else [None]
+
     async with CourtListenerClient(settings.courtlistener_api_token) as client:
         with Session(engine) as session:
-            for court in args.court:
+            for court in courts:
                 for chapter in args.chapter:
-                    ins, sk, er = await ingest_court_chapter(
+                    ins, sk, er = await ingest_filter(
                         client,
                         session,
                         court=court,
                         chapter=chapter,
+                        filed_after=args.filed_after,
+                        filed_before=args.filed_before,
                         max_results=args.max_per_combo,
                         dry_run=args.dry_run,
                     )
@@ -149,13 +178,26 @@ def main() -> None:
         "--court",
         action="append",
         default=None,
-        help="Court ID (e.g. deb, nysb, txsb). Repeatable. Defaults to deb.",
+        help=(
+            "Court ID (e.g. deb, nysb, txsb). Repeatable. "
+            "Omit for nationwide mode — one API call scans all 95 courts."
+        ),
     )
     parser.add_argument(
         "--chapter",
         action="append",
         default=None,
         help="Chapter number (7, 11, etc). Repeatable. Defaults to both 7 and 11.",
+    )
+    parser.add_argument(
+        "--filed-after",
+        default=None,
+        help="ISO date (YYYY-MM-DD). Only return filings on/after this date.",
+    )
+    parser.add_argument(
+        "--filed-before",
+        default=None,
+        help="ISO date (YYYY-MM-DD). Only return filings on/before this date.",
     )
     parser.add_argument(
         "--max-per-combo",
@@ -174,8 +216,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.court is None:
-        args.court = ["deb"]
     if args.chapter is None:
         args.chapter = ["7", "11"]
 

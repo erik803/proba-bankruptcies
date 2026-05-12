@@ -8,6 +8,7 @@ We retry on 429 / 5xx and on transient network errors. We do NOT retry on
 4xx auth errors (they won't fix themselves on retry).
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 
@@ -19,8 +20,16 @@ from tenacity import (
     wait_exponential,
 )
 
+# CourtListener's documented authenticated quota is 5 req/min, 50/hour, 125/day.
+# Sleep this long between pages of one search so we stay under the per-minute
+# ceiling without burning retries. See DECISIONS §1.6 for the math.
+INTER_PAGE_SLEEP_S = 13.0
 
-def _is_retryable(exc: BaseException) -> bool:
+
+def is_retryable(exc: BaseException) -> bool:
+    """True for HTTP statuses worth retrying (429 + 5xx) and transient
+    network/timeout errors. Exposed as part of the module's public API so
+    diagnostic scripts can share the same retry semantics."""
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
@@ -44,9 +53,12 @@ class CourtListenerClient:
             await self._http.aclose()
 
     @retry(
-        retry=retry_if_exception(_is_retryable),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
-        stop=stop_after_attempt(5),
+        retry=retry_if_exception(is_retryable),
+        # min=20s so a single 429 wait clears the per-minute window;
+        # max=120s as ceiling; up to 8 attempts so total budget covers
+        # the full 60s rate-limit window plus jitter.
+        wait=wait_exponential(multiplier=2, min=20, max=120),
+        stop=stop_after_attempt(8),
         reraise=True,
     )
     async def _request(self, url: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -58,13 +70,23 @@ class CourtListenerClient:
     async def search_recap(
         self,
         *,
-        court: str,
+        court: Optional[str] = None,
         query: str,
+        filed_after: Optional[str] = None,
+        filed_before: Optional[str] = None,
         page_size: int = 50,
         order_by: str = "dateFiled desc",
         max_results: int = 1000,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield individual results from the RECAP search, walking cursor pagination.
+
+        When `court` is None, the search runs nationwide — useful for steady-state
+        polling where one request scans all 95 courts at once (see DECISIONS §1.6
+        on rate-limit math).
+
+        `filed_after` / `filed_before` are ISO dates (YYYY-MM-DD) the API uses
+        to bound the result set. Watermark-style polling sets `filed_after` to
+        the most recent event we've already ingested.
 
         Stops when the server has no more pages OR when `max_results` results
         have been yielded. The `next` URL embeds the cursor and original
@@ -73,11 +95,16 @@ class CourtListenerClient:
         url: Optional[str] = f"{self.BASE_URL}/search/"
         params: Optional[dict[str, Any]] = {
             "type": "r",
-            "court": court,
             "q": query,
             "order_by": order_by,
             "page_size": page_size,
         }
+        if court is not None:
+            params["court"] = court
+        if filed_after is not None:
+            params["filed_after"] = filed_after
+        if filed_before is not None:
+            params["filed_before"] = filed_before
         yielded = 0
         while url is not None and yielded < max_results:
             data = await self._request(url, params=params)
@@ -88,3 +115,7 @@ class CourtListenerClient:
                 yielded += 1
             url = data.get("next")
             params = None
+            # Pace the next page to stay under the 5/min CL limit. No-op on
+            # the last page (loop exits before sleeping).
+            if url is not None and yielded < max_results:
+                await asyncio.sleep(INTER_PAGE_SLEEP_S)
