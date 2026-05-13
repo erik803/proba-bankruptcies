@@ -84,6 +84,10 @@ Take-home for Veridion. Tracks where we are across the phases laid out at the st
 ## Scheduled follow-ups
 - **~2026-05-15 (Fri) or later:** re-run `python -m bankruptcy.ingest_edgar --start 2026-05-11 --end 2026-05-16` and then `python -m bankruptcy.crosscheck`. Spanish Broadcasting System filed Ch 11 in Delaware on 2026-05-11 with 52 subsidiary entities — captured in CourtListener already, but the SEC 8-K Item 1.03 disclosure deadline is 4 business days (Fri 2026-05-15). When the 8-K lands in EDGAR, the cross-check pass should auto-link it into the existing 52-entity SBS group, demonstrating the fast-lane/broad-lane pattern end-to-end on a fresh major filing.
 
+## Constraints we measured (talking points)
+
+- **CourtListener 125/day cap is real and binding** (verified 2026-05-13). After ~125 requests across a single calendar day, the server returns 429 with `Retry-After: ~19 hours` until the daily counter rolls. The hourly 50-cap is softer; the per-minute 5-cap is strict. This bounds the achievable Ch 7 nationwide coverage on the free tier — see `DECISIONS.md §1.6`.
+
 ## Presentation reminders (deck prep)
 
 Things that are **deliberately documented but not built** — they live in the slides, not in code. Don't forget to cover them:

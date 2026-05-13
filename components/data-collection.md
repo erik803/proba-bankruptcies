@@ -77,6 +77,7 @@ How filings get from external sources into our database. Two source pipelines (C
 - **Where:** `scripts/`
 
 ## Known gaps
+- **Ch 7 coverage is sample-only, not exhaustive.** Total Ch 7 events: 253, of which 6 are classified business. A full nationwide backfill is infeasible on a free CourtListener account: their 125 requests/day cap is hard (we hit it empirically on 2026-05-13). At 125 pages/day = ~6,250 events/day, a 7-day Ch 7 window takes 2+ calendar days and a 30-day window takes a week. The production answer is a Free Law Project membership or paid PACER. See `DECISIONS.md §1.6`.
 - **Watermark is opt-in.** `--use-watermark` works end-to-end but defaults to off so existing manual workflows keep working unchanged. When this graduates from pilot to scheduled production it should flip to opt-out — see `DECISIONS.md §1.7` and the presentation reminders in `progress.md`.
 - **No third source.** News (GDELT / Reuters) would catch high-profile filings before either CL or EDGAR sees them. Not yet built — biggest remaining latency win on the table.
 - **Cross-check doesn't reconcile chapter mismatches.** If the 8-K body parse says one chapter and the linked CourtListener docket says another, we keep both as-is. The CL value should win (court of record); needs a one-liner in `crosscheck.py`.
